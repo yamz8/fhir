@@ -21,6 +21,7 @@ struct Event {
     QDateTime when;     // UTC, for ordering; partial dates start at their first instant
     bool hasTime = false;
     QString summary;    // "Hemoglobin A1c 7.2 %"
+    QString redactedSummary; // the same, with free text (notes, conclusions, strings) hidden
     QString status;
     QStringList codes;  // "system|code", LOINC first
     QString patientKey; // the Patient resource's label, or the raw reference
@@ -41,13 +42,21 @@ struct PatientGroup {
 struct Timeline {
     QList<Event> events;       // grouped by patient, then in date order
     QList<PatientGroup> groups;
+    // "Patient N" for every patient key, so redacted outputs name each person
+    // the same way everywhere: Patients in file order, then references to
+    // patients that aren't in the file, in the order they first appear.
+    QHash<QString, int> ordinals;
 };
 
 Timeline buildTimeline(const File &file, const QLocale &locale = QLocale::c());
 
 // "Test Patient", or "Patient 2" when redacted, or the reference when the
 // Patient isn't in the file.
-QString patientLabel(const File &file, const PatientGroup &group, int ordinal, bool redacted);
+QString patientLabel(const File &file, const Timeline &timeline, const PatientGroup &group, bool redacted);
+QString patientLabel(const File &file, const Timeline &timeline, const QString &key, int patient, bool redacted);
+inline const QString &summaryOf(const Event &event, bool redacted) {
+    return redacted ? event.redactedSummary : event.summary;
+}
 QString displayDate(const Event &event, const QLocale &locale);
 QDateTime parseFhirDate(const QString &value, bool *hasTime = nullptr);
 

@@ -1,5 +1,7 @@
 #include "fhirfile.h"
 
+#include "redact.h"
+
 #include <QCoreApplication>
 #include <QFile>
 #include <QFileInfo>
@@ -317,10 +319,12 @@ QString File::location(const Issue &issue) const {
     return resource.line ? QString("line %1: %2").arg(resource.line).arg(full) : full;
 }
 
-QString File::label(int index) const {
+QString File::label(int index, bool redacted) const {
     if (index < 0 || index >= resources.size())
         return {};
     const Resource &resource = resources[index];
+    if (redacted && isPersonType(resource.type))
+        return resource.type + "/" + kRedacted;
     if (resource.type.isEmpty())
         return resource.entry >= 0 ? indexPath("entry", resource.entry) : QString("(no resourceType)");
     return resource.id.isEmpty() ? resource.type : resource.type + "/" + resource.id;

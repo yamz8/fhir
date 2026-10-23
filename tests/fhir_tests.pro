@@ -1,5 +1,6 @@
 QT += core gui qml quick quickcontrols2 testlib dbus svg
-CONFIG += c++17 testcase
+# Debug, so Qt's own assertions (an empty QJsonArray::first()) fail the suite.
+CONFIG += c++17 testcase debug
 TARGET = fhir_tests
 TEMPLATE = app
 

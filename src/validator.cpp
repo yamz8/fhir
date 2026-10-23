@@ -76,12 +76,15 @@ enum class Format { None, Date, DateTime, Instant };
 // The format of a primitive, from its name, as R4 types them. Names that
 // mean different things in different resources are left alone.
 Format formatOf(const QString &key, const QString &parentKey) {
-    static const QSet<QString> dates = {"birthDate", "expirationDate"};
+    static const QSet<QString> dates = {"birthDate"};
     static const QSet<QString> instants = {"issued", "lastUpdated", "timestamp"};
     static const QSet<QString> dateTimes = {"recordedDate", "authoredOn", "lastOccurrence", "date",
                                             "dateAsserted", "dateWritten"};
     if (dates.contains(key))
         return Format::Date;
+    // Immunization.expirationDate is a date; Medication.batch.expirationDate a dateTime.
+    if (key == "expirationDate")
+        return parentKey == "batch" ? Format::DateTime : Format::Date;
     if (instants.contains(key) || key.endsWith("Instant"))
         return Format::Instant;
     if (dateTimes.contains(key) || key.endsWith("DateTime"))
@@ -434,6 +437,19 @@ private:
                     v.add(Severity::Error, indexPath(at(key), i),
                           tr("%1 is not one of: %2").arg(key, allowed.join(", ")), values[i].toString());
         }
+        void requireChoiceIn(const QString &list, const QString &stem, const QStringList &types) const {
+            const QJsonArray items = json.value(list).toArray();
+            for (int i = 0; i < items.size(); ++i) {
+                if (!items[i].isObject())
+                    continue;
+                bool found = false;
+                for (const auto &type : types)
+                    found = found || items[i].toObject().contains(stem + type);
+                if (!found)
+                    v.add(Severity::Error, indexPath(at(list), i),
+                          tr("%1.%2.%3[x] is required").arg(v.m_type, list, stem));
+            }
+        }
         void requireIn(const QString &list, const QString &key) const {
             const QJsonArray items = json.value(list).toArray();
             for (int i = 0; i < items.size(); ++i)
@@ -562,7 +578,7 @@ private:
             array({"identifier", "performer", "note", "reasonCode", "reasonReference", "reaction",
                    "protocolApplied"});
             requireIn("performer", "actor");
-            requireIn("protocolApplied", "doseNumberPositiveInt");
+            requireChoiceIn("protocolApplied", "doseNumber", {"PositiveInt", "String"});
         }
         void diagnosticReport() const {
             require("status");

@@ -40,8 +40,10 @@ following the desktop theme and language.
 - **Filter and search**: filter the timeline by resource type and date range,
   and search display text and codes across all three views.
 - **Redaction**: one key masks names, identifiers, addresses, telecom, birth
-  and death dates, photos, and narrative, on screen and in every export, for
-  screenshots and demos.
+  and death dates, photos, narrative, free text (notes, comments,
+  conclusions, string values), and the ids of patients and practitioners, on
+  screen and in every export, for screenshots and demos. Patients become
+  "Patient 1", "Patient 2" in the same order everywhere.
 - **Export** the validation report as JSON or CSV, and the timeline as CSV,
   a printable PDF, or SVG. Exports are written beside the target and renamed
   into place, so a failed export never leaves half a file.

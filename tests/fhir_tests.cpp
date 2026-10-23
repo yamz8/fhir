@@ -254,8 +254,8 @@ private slots:
                                          entry(uuid(54), observation("Patient/elsewhere", "2010-01-01", 5.0))}));
         const Timeline timeline = buildTimeline(file);
         QCOMPARE(timeline.groups.size(), 3);
-        QCOMPARE(patientLabel(file, timeline.groups[0], 1, false), QString("Test Patient"));
-        QCOMPARE(patientLabel(file, timeline.groups[1], 2, false), QString("Demo Patient"));
+        QCOMPARE(patientLabel(file, timeline, timeline.groups[0], false), QString("Test Patient"));
+        QCOMPARE(patientLabel(file, timeline, timeline.groups[1], false), QString("Demo Patient"));
         QCOMPARE(timeline.groups[2].key, QString("Patient/elsewhere"));
         QStringList order;
         for (const int index : timeline.groups[0].events)
@@ -396,9 +396,9 @@ private slots:
                                          entry(uuid(101), observation(kTestPatient, "2024-06-01", 6.8))}));
         const Timeline timeline = buildTimeline(file);
         QString error;
-        QVERIFY2(exportTimelineDocument(dir.filePath("t.pdf"), file, timeline, Filter(), true, QLocale::c(), &error),
+        QVERIFY2(exportTimelineDocument(dir.filePath("t.pdf"), "pdf", file, timeline, Filter(), true, QLocale::c(), &error),
                  qPrintable(error));
-        QVERIFY(exportTimelineDocument(dir.filePath("t.svg"), file, timeline, Filter(), true, QLocale::c(), &error));
+        QVERIFY(exportTimelineDocument(dir.filePath("t.svg"), "svg", file, timeline, Filter(), true, QLocale::c(), &error));
         QFile pdf(dir.filePath("t.pdf")), svg(dir.filePath("t.svg"));
         QVERIFY(pdf.open(QIODevice::ReadOnly) && pdf.read(4) == "%PDF");
         QVERIFY(svg.open(QIODevice::ReadOnly));
@@ -454,6 +454,179 @@ private slots:
         QCOMPARE(runCli({"fhir", "timeline", clean, "--from", "January"}), 1);
         QCOMPARE(runCli({"fhir", "frobnicate"}), 1);
         QCOMPARE(runCli({"fhir"}), 0);
+    }
+
+    void oddTimingDoesNotCrash()
+    {
+        QJsonObject negative{{"resourceType", "MedicationRequest"}, {"id", "m1"}, {"status", "active"},
+                             {"intent", "order"}, {"subject", QJsonObject{{"reference", kTestPatient}}},
+                             {"authoredOn", "2024-01-01"},
+                             {"medicationCodeableConcept", coded("http://www.nlm.nih.gov/research/umls/rxnorm", "1", "Drug", "Drug")},
+                             {"dosageInstruction", QJsonArray{QJsonObject{{"timing", QJsonObject{{"repeat",
+                                 QJsonObject{{"frequency", -3}, {"period", 1}, {"periodUnit", "d"}}}}}}}}};
+        QJsonObject bare = negative;
+        bare.insert("id", "m2");
+        bare.remove("dosageInstruction");
+        const QJsonObject encounter{{"resourceType", "Encounter"}, {"id", "e1"}, {"status", "finished"},
+                                    {"class", QJsonObject{{"code", "AMB"}}}, {"reasonCode", QJsonArray()},
+                                    {"subject", QJsonObject{{"reference", kTestPatient}}},
+                                    {"period", QJsonObject{{"start", "2024-01-02"}}}};
+        const File file = loaded(bundle({entry(kTestPatient, testPatient()), entry(uuid(120), negative),
+                                         entry(uuid(121), bare), entry(uuid(122), encounter)}));
+        QStringList summaries;
+        for (const auto &event : buildTimeline(file).events)
+            summaries << event.summary;
+        QVERIFY2(summaries.contains("Drug -3×/d"), qPrintable(summaries.join(" | ")));
+        QVERIFY(summaries.contains("Drug"));
+        QVERIFY(summaries.contains("Encounter (AMB)"));
+    }
+
+    void summaryHasADateRange()
+    {
+        const File file = loaded(bundle({entry(kTestPatient, testPatient()),
+                                         entry(uuid(130), observation(kTestPatient, "2024-06-01", 6.8)),
+                                         entry(uuid(131), observation(kTestPatient, "2023-01-01", 7.2))}));
+        const QJsonObject range = summaryJson(file, validate(file), buildTimeline(file), false)
+                                      .value("dateRange").toObject();
+        QCOMPARE(range.value("start").toString(), QString("2023-01-01"));
+        QCOMPARE(range.value("end").toString(), QString("2024-06-01"));
+    }
+
+    void redactedPatientsAreNumberedOneWay()
+    {
+        // The first Patient has no dated events, so the timeline's first group is the second Patient.
+        const File file = loaded(bundle({entry(kTestPatient, testPatient()),
+                                         entry(kDemoPatient, testPatient("demo-patient", "Demo")),
+                                         entry(uuid(140), observation(kDemoPatient, "2024-01-01", 7.2)),
+                                         entry(uuid(141), observation("Patient/elsewhere", "2024-01-02", 7.0))}));
+        const Timeline timeline = buildTimeline(file);
+        const QJsonArray patients = summaryJson(file, {}, timeline, true).value("patients").toArray();
+        QCOMPARE(patients[1].toObject().value("name").toString(), QString("Patient 2"));
+        const QJsonArray groups = timelineJson(file, timeline, Filter(), true).value("patients").toArray();
+        QCOMPARE(groups[0].toObject().value("patient").toString(), QString("Patient 2"));
+        QCOMPARE(groups[1].toObject().value("patient").toString(), QString("Patient 3"));
+        const QByteArray csv = timelineCsv(file, timeline, Filter(), true);
+        QVERIFY2(csv.contains("Patient 2,2024-01-01") && !csv.contains("Patient 1,"), csv.constData());
+        Backend backend;
+        QTemporaryDir dir;
+        write(dir.filePath("b.json"), QJsonDocument(bundle({entry(kTestPatient, testPatient()),
+                                                            entry(kDemoPatient, testPatient("demo-patient", "Demo")),
+                                                            entry(uuid(140), observation(kDemoPatient, "2024-01-01", 7.2))}))
+                                          .toJson());
+        QVERIFY(backend.openPath(dir.filePath("b.json")));
+        backend.setRedact(true);
+        QCOMPARE(backend.timelineRows().first().toMap().value("label").toString(), QString("Patient 2"));
+        QCOMPARE(backend.eventDetail(0).value("patient").toString(), QString("Patient 2"));
+        QStringList treeNames;
+        for (const auto &row : backend.resourceRows())
+            if (row.toMap().value("type") == "Patient" && !row.toMap().value("header").toBool())
+                treeNames << row.toMap().value("summary").toString();
+        QCOMPARE(treeNames, QStringList({"Patient 1", "Patient 2"}));
+    }
+
+    void redactionHidesFreeTextAndPersonIds()
+    {
+        const QString john = "Patient/john-smith";
+        QJsonObject patient = testPatient("john-smith");
+        QJsonObject noted = observation(john, "2024-01-01", 7.2);
+        noted.insert("note", QJsonArray{QJsonObject{{"text", "Pt John Smith called from 555-1234"}}});
+        QJsonObject stringValue = observation(john, "2024-01-02", 0);
+        stringValue.remove("valueQuantity");
+        stringValue.insert("id", "string-value");
+        stringValue.insert("valueString", "Seen with John Smith's daughter");
+        const QJsonObject report{{"resourceType", "DiagnosticReport"}, {"id", "r1"}, {"status", "final"},
+                                 {"code", coded("http://loinc.org", "1", "Panel", "Panel")},
+                                 {"subject", QJsonObject{{"reference", john}}}, {"effectiveDateTime", "2024-01-03"},
+                                 {"conclusion", "John Smith is fine"}};
+        const File file = loaded(bundle({entry("https://example.org/fhir/Patient/john-smith", patient),
+                                         entry(uuid(150), noted), entry(uuid(151), stringValue), entry(uuid(152), report),
+                                         entry(uuid(153), observation("Patient/john-missing", "2024-01-04", 1))}));
+        const QByteArray shown = QJsonDocument(redact(file.resources[2].shown).toObject()).toJson();
+        QVERIFY2(!shown.contains("John") && !shown.contains("555-1234") && !shown.contains("john-smith"), shown.constData());
+        QVERIFY(shown.contains("Patient/[redacted]"));
+        QVERIFY(shown.contains("Hemoglobin A1c"));
+        const QByteArray entryShown = QJsonDocument(redact(file.resources[1].shown).toObject()).toJson();
+        QVERIFY2(!entryShown.contains("john-smith"), entryShown.constData());
+
+        const Timeline timeline = buildTimeline(file);
+        const QList<Issue> issues = validate(file);
+        for (const QByteArray &out : {timelineCsv(file, timeline, Filter(), true),
+                                      QJsonDocument(timelineJson(file, timeline, Filter(), true)).toJson(),
+                                      QJsonDocument(summaryJson(file, issues, timeline, true)).toJson(),
+                                      QJsonDocument(issuesJson(file, issues, true)).toJson(),
+                                      issuesCsv(file, issues, true)})
+            QVERIFY2(!out.contains("John") && !out.contains("john-"), out.constData());
+        QVERIFY(timelineCsv(file, timeline, Filter(), false).contains("John Smith is fine"));
+        QVERIFY(QJsonDocument(issuesJson(file, issues, false)).toJson().contains("Patient/john-missing"));
+    }
+
+    void csvNeverStartsAFormula()
+    {
+        const QJsonObject report{{"resourceType", "DiagnosticReport"}, {"id", "r1"}, {"status", "final"},
+                                 {"code", coded("http://loinc.org", "1", "Panel", "-2+3+cmd|' /C calc'!A0")},
+                                 {"subject", QJsonObject{{"reference", kTestPatient}}}, {"effectiveDateTime", "2024-01-03"}};
+        const File file = loaded(bundle({entry(kTestPatient, testPatient()), entry(uuid(160), report)}));
+        const QByteArray csv = timelineCsv(file, buildTimeline(file), Filter(), false);
+        QVERIFY2(csv.contains(",\"'-2+3+cmd|' /C calc'!A0\",") || csv.contains(",'-2+3+cmd|' /C calc'!A0,"), csv.constData());
+    }
+
+    void validChoicesAndDatesAreAccepted()
+    {
+        QJsonObject immunization{{"resourceType", "Immunization"}, {"id", "i1"}, {"status", "completed"},
+                                 {"vaccineCode", coded("http://hl7.org/fhir/sid/cvx", "115", "Tdap")},
+                                 {"patient", QJsonObject{{"reference", kTestPatient}}},
+                                 {"occurrenceDateTime", "2024-01-01"},
+                                 {"expirationDate", "2025-01-01"},
+                                 {"protocolApplied", QJsonArray{QJsonObject{{"doseNumberString", "booster"}},
+                                                                QJsonObject{{"doseNumberPositiveInt", 2}},
+                                                                QJsonObject{{"series", "none"}}}}};
+        const QJsonObject medication{{"resourceType", "Medication"}, {"id", "med1"},
+                                     {"batch", QJsonObject{{"lotNumber", "L1"}, {"expirationDate", "2025-01-01T00:00:00Z"}}}};
+        QJsonObject lateImmunization = immunization;
+        lateImmunization.insert("id", "i2");
+        lateImmunization.insert("expirationDate", "2025-01-01T00:00:00Z");
+        lateImmunization.remove("protocolApplied");
+        const File file = loaded(bundle({entry(kTestPatient, testPatient()), entry(uuid(170), immunization),
+                                         entry(uuid(171), medication), entry(uuid(172), lateImmunization)}));
+        const QList<Issue> issues = validate(file);
+        QCOMPARE(issues.size(), 2);
+        QVERIFY2(has(issues, Severity::Error, "resource.protocolApplied[2]", "doseNumber[x] is required"), qPrintable(dump(issues)));
+        QVERIFY(has(issues, Severity::Error, "resource.expirationDate", "not a valid FHIR date"));
+        QCOMPARE(issues.last().resource, 4);
+    }
+
+    void svgExportFollowsTheChoiceNotTheName()
+    {
+        QTemporaryDir dir;
+        write(dir.filePath("b.json"), QJsonDocument(bundle({entry(kTestPatient, testPatient()),
+                                                            entry(uuid(180), observation(kTestPatient, "2024-01-01", 7.2))}))
+                                          .toJson());
+        Backend backend;
+        QVERIFY(backend.openPath(dir.filePath("b.json")));
+        QVERIFY(backend.exportTo("timeline-svg", dir.filePath("timeline")));
+        QVERIFY(backend.exportTo("timeline-pdf", dir.filePath("printout")));
+        QFile svg(dir.filePath("timeline")), pdf(dir.filePath("printout"));
+        QVERIFY(svg.open(QIODevice::ReadOnly) && svg.readAll().contains("<svg"));
+        QVERIFY(pdf.open(QIODevice::ReadOnly) && pdf.read(4) == "%PDF");
+    }
+
+    void incomingReferencesAreIndexed()
+    {
+        QTemporaryDir dir;
+        write(dir.filePath("b.json"), QJsonDocument(bundle({entry(kTestPatient, testPatient()),
+                                                            entry(uuid(190), observation(kTestPatient, "2024-01-01", 7.2)),
+                                                            entry(uuid(191), observation("Patient/test-patient", "2024-02-01", 7.0))}))
+                                          .toJson());
+        Backend backend;
+        QVERIFY(backend.openPath(dir.filePath("b.json")));
+        int incoming = 0, outgoing = 0;
+        for (const auto &item : backend.references(1))
+            (item.toMap().value("incoming").toBool() ? incoming : outgoing) += 1;
+        QCOMPARE(incoming, 2);
+        QCOMPARE(outgoing, 0);
+        const QVariantList fromObservation = backend.references(2);
+        QCOMPARE(fromObservation.size(), 1);
+        QCOMPARE(fromObservation.first().toMap().value("target").toInt(), 1);
     }
 
     void themeFallsBack()

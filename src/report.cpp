@@ -24,7 +24,7 @@ QString tr(const char *text) {
 
 // Quoted when needed, and never read by a spreadsheet as a formula.
 QString csvField(QString value) {
-    if (!value.isEmpty() && QStringLiteral("=+@\t\r").contains(value.front()))
+    if (!value.isEmpty() && QStringLiteral("=+-@\t\r").contains(value.front()))
         value.prepend('\'');
     if (value.contains(QRegularExpression(R"([",\n\r])")))
         value = '"' + value.replace('"', "\"\"") + '"';
@@ -54,11 +54,16 @@ QString kindName(File::Kind kind) {
 
 } // namespace
 
+QString issueValue(const Issue &issue, bool redacted) {
+    if (!redacted)
+        return issue.value;
+    return isPhiPath(issue.path) ? QString(kRedacted) : redactReference(issue.value);
+}
+
 QString issueText(const Issue &issue, bool redacted) {
     if (issue.value.isEmpty())
         return issue.message;
-    const QString value = redacted && isPhiPath(issue.path) ? QString(kRedacted) : issue.value;
-    return issue.message + ": \"" + value + "\"";
+    return issue.message + ": \"" + issueValue(issue, redacted) + "\"";
 }
 
 QJsonObject issuesJson(const File &file, const QList<Issue> &issues, bool redacted) {
@@ -70,9 +75,9 @@ QJsonObject issuesJson(const File &file, const QList<Issue> &issues, bool redact
                          {"path", issue.path},
                          {"message", issue.message}};
         if (!issue.value.isEmpty())
-            item.insert("value", redacted && isPhiPath(issue.path) ? QString(kRedacted) : issue.value);
+            item.insert("value", issueValue(issue, redacted));
         if (issue.resource >= 0)
-            item.insert("resource", file.label(issue.resource));
+            item.insert("resource", file.label(issue.resource, redacted));
         list << item;
     }
     return {{"file", fileName(file)},
@@ -87,7 +92,7 @@ QJsonObject issuesJson(const File &file, const QList<Issue> &issues, bool redact
 QByteArray issuesCsv(const File &file, const QList<Issue> &issues, bool redacted) {
     QByteArray out = csvRow({"severity", "location", "resource", "message"});
     for (const auto &issue : issues)
-        out += csvRow({severityName(issue.severity), file.location(issue), file.label(issue.resource),
+        out += csvRow({severityName(issue.severity), file.location(issue), file.label(issue.resource, redacted),
                        issueText(issue, redacted)});
     return out;
 }
@@ -99,30 +104,29 @@ QJsonObject summaryJson(const File &file, const QList<Issue> &issues, const Time
             counts.insert(resource.type.isEmpty() ? "(none)" : resource.type,
                           counts.value(resource.type.isEmpty() ? "(none)" : resource.type).toInt() + 1);
     QJsonArray patients;
-    int ordinal = 0;
     for (int i = 0; i < file.resources.size(); ++i) {
         if (file.resources[i].type != "Patient")
             continue;
-        ++ordinal;
         const QJsonObject json = file.resources[i].json;
         int events = 0;
         for (const auto &group : timeline.groups)
             if (group.patient == i)
                 events = group.events.size();
-        QJsonObject patient{{"reference", file.label(i)}, {"events", events}};
-        patient.insert("name", redacted ? QString("Patient %1").arg(ordinal) : patientName(json));
+        QJsonObject patient{{"reference", file.label(i, redacted)}, {"events", events}};
+        patient.insert("name", patientLabel(file, timeline, file.label(i), i, redacted));
         if (json.contains("birthDate"))
             patient.insert("birthDate", redacted ? QString(kRedacted) : json.value("birthDate").toString());
         if (json.contains("gender"))
             patient.insert("gender", json.value("gender").toString());
         patients << patient;
     }
-    QJsonValue start, end;
+    // The first and last events, as written in the file.
+    const Event *first = nullptr, *last = nullptr;
     for (const auto &event : timeline.events) {
-        if (start.isUndefined() || event.when < parseFhirDate(start.toString()))
-            start = event.date;
-        if (end.isUndefined() || event.when > parseFhirDate(end.toString()))
-            end = event.date;
+        if (!first || event.when < first->when)
+            first = &event;
+        if (!last || event.when > last->when)
+            last = &event;
     }
     const IssueCounts issueCounts = countIssues(issues);
     return {{"file", fileName(file)},
@@ -131,8 +135,8 @@ QJsonObject summaryJson(const File &file, const QList<Issue> &issues, const Time
             {"counts", counts},
             {"patients", patients},
             {"events", timeline.events.size()},
-            {"dateRange", QJsonObject{{"start", start.isUndefined() ? QJsonValue() : start},
-                                      {"end", end.isUndefined() ? QJsonValue() : end}}},
+            {"dateRange", QJsonObject{{"start", first ? QJsonValue(first->date) : QJsonValue()},
+                                      {"end", last ? QJsonValue(last->date) : QJsonValue()}}},
             {"issues", QJsonObject{{"errors", issueCounts.errors},
                                    {"warnings", issueCounts.warnings},
                                    {"info", issueCounts.infos},
@@ -150,15 +154,16 @@ QJsonObject timelineJson(const File &file, const Timeline &timeline, const Filte
                 continue;
             events << QJsonObject{{"date", event.date},
                                   {"type", event.type},
-                                  {"summary", event.summary},
+                                  {"summary", summaryOf(event, redacted)},
                                   {"status", event.status},
                                   {"codes", QJsonArray::fromStringList(event.codes)},
-                                  {"resource", file.label(event.resource)}};
+                                  {"resource", file.label(event.resource, redacted)}};
         }
         if (events.isEmpty())
             continue;
-        groups << QJsonObject{{"patient", patientLabel(file, group, g + 1, redacted)},
-                              {"reference", group.key.isEmpty() ? QJsonValue() : QJsonValue(group.key)},
+        groups << QJsonObject{{"patient", patientLabel(file, timeline, group, redacted)},
+                              {"reference", group.key.isEmpty() ? QJsonValue()
+                                                                : QJsonValue(redacted ? redactReference(group.key) : group.key)},
                               {"events", events}};
     }
     return {{"file", fileName(file)}, {"patients", groups}};
@@ -168,12 +173,12 @@ QByteArray timelineCsv(const File &file, const Timeline &timeline, const Filter 
     QByteArray out = csvRow({"patient", "date", "type", "summary", "status", "codes", "resource"});
     for (int g = 0; g < timeline.groups.size(); ++g) {
         const PatientGroup &group = timeline.groups[g];
-        const QString label = patientLabel(file, group, g + 1, redacted);
+        const QString label = patientLabel(file, timeline, group, redacted);
         for (const int index : group.events) {
             const Event &event = timeline.events[index];
             if (filter.matches(file, event))
-                out += csvRow({label, event.date, event.type, event.summary, event.status, event.codes.join(' '),
-                               file.label(event.resource)});
+                out += csvRow({label, event.date, event.type, summaryOf(event, redacted), event.status,
+                               event.codes.join(' '), file.label(event.resource, redacted)});
         }
     }
     return out;
@@ -248,7 +253,7 @@ QList<Block> layoutTimeline(const File &file, const Timeline &timeline, const Fi
                 visible << index;
         if (visible.isEmpty())
             continue;
-        const QString label = patientLabel(file, group, g + 1, redacted);
+        const QString label = patientLabel(file, timeline, group, redacted);
         const QString count = QCoreApplication::translate("Report", "%n events", nullptr, int(visible.size()));
         blocks << Block{line * 2.4, [=](QPainter *p, const QRectF &r) {
                             p->setFont(heading);
@@ -298,10 +303,11 @@ QList<Block> layoutTimeline(const File &file, const Timeline &timeline, const Fi
         for (const int index : visible) {
             const Event event = timeline.events[index];
             const QString date = displayDate(event, locale);
+            const QString summary = summaryOf(event, redacted);
             const QFontMetricsF metrics(base);
             const QRectF measure(0, 0, width - dateWidth - typeWidth, 10000);
             const double height =
-                std::max(line, metrics.boundingRect(measure, Qt::TextWordWrap, event.summary).height()) + line * 0.5;
+                std::max(line, metrics.boundingRect(measure, Qt::TextWordWrap, summary).height()) + line * 0.5;
             blocks << Block{height, [=](QPainter *p, const QRectF &r) {
                                 p->setFont(base);
                                 p->setPen(muted);
@@ -312,7 +318,7 @@ QList<Block> layoutTimeline(const File &file, const Timeline &timeline, const Fi
                                 p->setPen(ink);
                                 p->drawText(QRectF(r.left() + dateWidth + typeWidth, r.top(),
                                                    r.width() - dateWidth - typeWidth, r.height()),
-                                            Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, event.summary);
+                                            Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, summary);
                             }};
         }
     }
@@ -321,9 +327,9 @@ QList<Block> layoutTimeline(const File &file, const Timeline &timeline, const Fi
 
 } // namespace
 
-bool exportTimelineDocument(const QString &path, const File &file, const Timeline &timeline, const Filter &filter,
-                            bool redacted, const QLocale &locale, QString *error) {
-    const bool svg = path.endsWith(".svg", Qt::CaseInsensitive);
+bool exportTimelineDocument(const QString &path, const QString &format, const File &file, const Timeline &timeline,
+                            const Filter &filter, bool redacted, const QLocale &locale, QString *error) {
+    const bool svg = format == "svg";
     QSaveFile out(path);
     if (!out.open(QIODevice::WriteOnly)) {
         if (error)

@@ -1,5 +1,7 @@
 #include "timeline.h"
 
+#include "redact.h"
+
 #include <QCoreApplication>
 #include <QTimeZone>
 #include <QJsonArray>
@@ -41,14 +43,15 @@ QString reference(const File &file, const QJsonValue &value) {
     return ref.value("reference").toString();
 }
 
-// The value of an Observation or component, as one short phrase.
-QString valueText(const QJsonObject &o, const QLocale &locale) {
+// The value of an Observation or component, as one short phrase. Redacted,
+// free text written by people is hidden.
+QString valueText(const QJsonObject &o, const QLocale &locale, bool redacted = false) {
     if (o.contains("valueQuantity"))
         return quantity(o.value("valueQuantity").toObject(), locale);
     if (o.contains("valueCodeableConcept"))
         return conceptText(o.value("valueCodeableConcept"));
     if (o.contains("valueString"))
-        return o.value("valueString").toString();
+        return redacted ? QString(kRedacted) : o.value("valueString").toString();
     if (o.contains("valueBoolean"))
         return o.value("valueBoolean").toBool() ? tr("yes") : tr("no");
     if (o.contains("valueInteger"))
@@ -64,9 +67,9 @@ QString valueText(const QJsonObject &o, const QLocale &locale) {
     return {};
 }
 
-QString observationSummary(const QJsonObject &o, const QLocale &locale) {
+QString observationSummary(const QJsonObject &o, const QLocale &locale, bool redacted) {
     const QString name = conceptText(o.value("code"));
-    QString value = valueText(o, locale);
+    QString value = valueText(o, locale, redacted);
     const QJsonArray components = o.value("component").toArray();
     if (value.isEmpty() && !components.isEmpty()) {
         // Blood pressure reads 120/80 mmHg: values that share a unit are
@@ -82,7 +85,7 @@ QString observationSummary(const QJsonObject &o, const QLocale &locale) {
             if (unit.isEmpty())
                 unit = unitOf(q);
             numbers << number(q.value("value").toDouble(), locale);
-            parts << conceptText(component.value("code")) + " " + valueText(component, locale);
+            parts << conceptText(component.value("code")) + " " + valueText(component, locale, redacted);
         }
         value = shared ? numbers.join('/') + (unit.isEmpty() ? QString() : " " + unit) : parts.join("; ");
     }
@@ -118,7 +121,7 @@ QString timingText(const QJsonObject &timing) {
         return {};
     if (unit == "d" && period == 1) {
         static const QStringList perDay = {"", "daily", "BID", "TID", "QID"};
-        return frequency < perDay.size() ? perDay[frequency] : QString("%1×/d").arg(frequency);
+        return frequency >= 1 && frequency < perDay.size() ? perDay[frequency] : QString("%1×/d").arg(frequency);
     }
     if (unit == "h" && frequency == 1)
         return QString("q%1h").arg(period);
@@ -127,13 +130,13 @@ QString timingText(const QJsonObject &timing) {
     return QString("%1×/%2%3").arg(frequency).arg(period == 1 ? QString() : QString::number(period), unit);
 }
 
-QString medicationSummary(const File &file, const QJsonObject &m, const QLocale &locale) {
+QString medicationSummary(const File &file, const QJsonObject &m, const QLocale &locale, bool redacted) {
     QString name = conceptText(m.value("medicationCodeableConcept"));
     if (name.isEmpty())
         name = reference(file, m.value("medicationReference"));
-    const QJsonObject dosage = m.value("dosageInstruction").toArray().first().toObject();
+    const QJsonObject dosage = m.value("dosageInstruction").toArray().at(0).toObject();
     QStringList parts{name};
-    const QJsonObject rate = dosage.value("doseAndRate").toArray().first().toObject();
+    const QJsonObject rate = dosage.value("doseAndRate").toArray().at(0).toObject();
     if (rate.contains("doseQuantity"))
         parts << quantity(rate.value("doseQuantity").toObject(), locale);
     if (dosage.contains("route"))
@@ -144,28 +147,28 @@ QString medicationSummary(const File &file, const QJsonObject &m, const QLocale 
         parts << "PRN";
     parts.removeAll(QString());
     if (parts.size() == 1 && !dosage.value("text").toString().isEmpty())
-        parts << dosage.value("text").toString();
+        parts << (redacted ? QString(kRedacted) : dosage.value("text").toString());
     return parts.join(' ');
 }
 
-QString summarize(const File &file, const Resource &resource, const QLocale &locale) {
+QString summarize(const File &file, const Resource &resource, const QLocale &locale, bool redacted) {
     const QJsonObject &j = resource.json;
     const QString type = resource.type;
     if (type == "Observation")
-        return observationSummary(j, locale);
+        return observationSummary(j, locale, redacted);
     if (type == "MedicationRequest")
-        return medicationSummary(file, j, locale);
+        return medicationSummary(file, j, locale, redacted);
     if (type == "Encounter") {
-        QString text = conceptText(j.value("type").toArray().first());
+        QString text = conceptText(j.value("type").toArray().at(0));
         if (text.isEmpty())
             text = j.value("class").toObject().value("display").toString();
         if (text.isEmpty())
             text = tr("Encounter (%1)").arg(j.value("class").toObject().value("code").toString());
-        const QString reason = conceptText(j.value("reasonCode").toArray().first());
+        const QString reason = conceptText(j.value("reasonCode").toArray().at(0));
         return reason.isEmpty() ? text : text + " · " + reason;
     }
     if (type == "Condition") {
-        const QString status = j.value("clinicalStatus").toObject().value("coding").toArray().first()
+        const QString status = j.value("clinicalStatus").toObject().value("coding").toArray().at(0)
                                    .toObject().value("code").toString();
         const QString text = conceptText(j.value("code"));
         return status.isEmpty() || status == "active" ? text : text + " (" + status + ")";
@@ -177,7 +180,7 @@ QString summarize(const File &file, const Resource &resource, const QLocale &loc
     if (type == "DiagnosticReport") {
         const QString text = conceptText(j.value("code"));
         const QString conclusion = j.value("conclusion").toString();
-        return conclusion.isEmpty() ? text : text + ": " + conclusion;
+        return conclusion.isEmpty() ? text : text + ": " + (redacted ? QString(kRedacted) : conclusion);
     }
     if (type == "AllergyIntolerance") {
         const QString text = conceptText(j.value("code"));
@@ -241,7 +244,8 @@ Timeline buildTimeline(const File &file, const QLocale &locale) {
             event.date = date;
             event.when = when;
             event.hasTime = hasTime;
-            event.summary = summarize(file, resource, locale);
+            event.summary = summarize(file, resource, locale, false);
+            event.redactedSummary = summarize(file, resource, locale, true);
             event.status = resource.json.value("status").toString();
             if (event.status.isEmpty())
                 event.status = resource.json.value("clinicalStatus").toObject().value("coding").toArray()
@@ -249,7 +253,7 @@ Timeline buildTimeline(const File &file, const QLocale &locale) {
             const QString codeKey = resource.type == "Immunization" ? "vaccineCode"
                                     : resource.type == "MedicationRequest" ? "medicationCodeableConcept"
                                                                            : "code";
-            const QJsonValue coded = resource.type == "Encounter" ? resource.json.value("type").toArray().first()
+            const QJsonValue coded = resource.type == "Encounter" ? resource.json.value("type").toArray().at(0)
                                                                     : resource.json.value(codeKey);
             event.codes = conceptCodes(coded);
             event.codeText = conceptText(coded);
@@ -290,6 +294,15 @@ Timeline buildTimeline(const File &file, const QLocale &locale) {
     });
 
     Timeline timeline;
+    int ordinal = 0;
+    for (int i = 0; i < file.resources.size(); ++i)
+        if (file.resources[i].type == "Patient")
+            timeline.ordinals.insert(file.label(i), ++ordinal);
+    for (int i = 0; i < file.resources.size(); ++i) {
+        const QString reference = file.patientReference(i);
+        if (!reference.isEmpty() && file.patientOf(i) < 0 && !timeline.ordinals.contains(reference))
+            timeline.ordinals.insert(reference, ++ordinal);
+    }
     timeline.events = events;
     for (int i = 0; i < events.size(); ++i) {
         if (timeline.groups.isEmpty() || timeline.groups.last().key != events[i].patientKey)
@@ -299,16 +312,20 @@ Timeline buildTimeline(const File &file, const QLocale &locale) {
     return timeline;
 }
 
-QString patientLabel(const File &file, const PatientGroup &group, int ordinal, bool redacted) {
-    if (group.key.isEmpty())
+QString patientLabel(const File &file, const Timeline &timeline, const QString &key, int patient, bool redacted) {
+    if (key.isEmpty())
         return tr("No patient");
     if (redacted)
-        return tr("Patient %1").arg(ordinal);
-    if (group.patient >= 0) {
-        const QString name = patientName(file.resources[group.patient].json);
-        return name.isEmpty() ? group.key : name;
+        return tr("Patient %1").arg(timeline.ordinals.value(key));
+    if (patient >= 0) {
+        const QString name = patientName(file.resources[patient].json);
+        return name.isEmpty() ? key : name;
     }
-    return tr("%1 (not in file)").arg(group.key);
+    return tr("%1 (not in file)").arg(key);
+}
+
+QString patientLabel(const File &file, const Timeline &timeline, const PatientGroup &group, bool redacted) {
+    return patientLabel(file, timeline, group.key, group.patient, redacted);
 }
 
 QString displayDate(const Event &event, const QLocale &locale) {

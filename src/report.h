@@ -9,7 +9,9 @@
 
 namespace fhir {
 
-// The message with its value, or with the value hidden when it is identifying.
+// The offending value, hidden when it is identifying.
+QString issueValue(const Issue &issue, bool redacted);
+// The message with its value.
 QString issueText(const Issue &issue, bool redacted);
 
 QJsonObject issuesJson(const File &file, const QList<Issue> &issues, bool redacted);
@@ -22,9 +24,10 @@ QByteArray timelineCsv(const File &file, const Timeline &timeline, const Filter 
 
 TrendSeries trendSeries(const Timeline &timeline, const QList<int> &events);
 
-// A printable timeline: PDF pages, or one tall SVG, picked by the suffix.
-bool exportTimelineDocument(const QString &path, const File &file, const Timeline &timeline, const Filter &filter,
-                            bool redacted, const QLocale &locale, QString *error);
+// A printable timeline: PDF pages, or one tall SVG. The format is "pdf" or
+// "svg", as chosen, whatever the file name ends with.
+bool exportTimelineDocument(const QString &path, const QString &format, const File &file, const Timeline &timeline,
+                            const Filter &filter, bool redacted, const QLocale &locale, QString *error);
 
 // Writes beside the target and renames over it, so a failed export never
 // leaves half a file behind.

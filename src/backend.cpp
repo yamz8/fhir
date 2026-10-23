@@ -99,6 +99,22 @@ bool Backend::openPath(const QString &path) {
     m_infos = counts.infos;
     m_timeline = buildTimeline(m_file, QLocale());
     m_trends = trends(m_timeline);
+    // What points at each resource, found once here rather than on every selection.
+    m_incoming.clear();
+    for (int i = 0; i < m_file.resources.size(); ++i) {
+        if (m_file.resources[i].container)
+            continue;
+        QList<QPair<QString, QString>> found;
+        collectReferences(m_file.resources[i].shown, QString(), found);
+        QSet<int> targets;
+        for (const auto &[path, reference] : found) {
+            const int target = m_file.resolve(reference);
+            if (target >= 0 && target != i && !targets.contains(target)) {
+                targets.insert(target);
+                m_incoming[target] << qMakePair(i, path);
+            }
+        }
+    }
     m_filter = Filter();
     m_collapsed.clear();
     emit fileChanged();
@@ -155,7 +171,7 @@ bool Backend::exportTo(const QString &kind, const QString &path) {
     else if (kind == "timeline-csv")
         ok = saveAtomically(path, timelineCsv(m_file, m_timeline, m_filter, m_redact), &error);
     else if (kind == "timeline-pdf" || kind == "timeline-svg")
-        ok = exportTimelineDocument(path, m_file, m_timeline, m_filter, m_redact, QLocale(), &error);
+        ok = exportTimelineDocument(path, kind.section('-', 1), m_file, m_timeline, m_filter, m_redact, QLocale(), &error);
     else
         error = tr("Unknown export");
     showMessage(ok ? tr("Exported %1").arg(QFileInfo(path).fileName())
@@ -276,14 +292,14 @@ void Backend::rebuildTimelineRows() {
                                 {"resource", event.resource},
                                 {"type", event.type},
                                 {"date", displayDate(event, QLocale())},
-                                {"summary", event.summary},
+                                {"summary", summaryOf(event, m_redact)},
                                 {"status", event.status},
                                 {"hasTrend", m_trends.contains(event.trendKey)}};
         }
         if (rows.isEmpty())
             continue;
         m_timelineRows << QVariantMap{{"header", true},
-                                      {"label", patientLabel(m_file, group, g + 1, m_redact)},
+                                      {"label", patientLabel(m_file, m_timeline, group, m_redact)},
                                       {"count", rows.size()},
                                       {"resource", group.patient}};
         m_timelineRows += rows;
@@ -316,8 +332,7 @@ void Backend::rebuildResourceRows() {
     });
     QHash<int, QString> summaries;
     for (const auto &event : m_timeline.events)
-        summaries.insert(event.resource, event.summary);
-    int patientOrdinal = 0;
+        summaries.insert(event.resource, summaryOf(event, m_redact));
     for (const auto &type : types) {
         const QList<int> indices = byType.value(type);
         const bool expanded = !m_collapsed.contains(type);
@@ -327,19 +342,19 @@ void Backend::rebuildResourceRows() {
             const Resource &resource = m_file.resources[index];
             QString summary = summaries.value(index);
             if (resource.type == "Patient") {
-                ++patientOrdinal;
-                summary = m_redact ? tr("Patient %1").arg(patientOrdinal) : patientName(resource.json);
+                summary = patientLabel(m_file, m_timeline, m_file.label(index), index, m_redact);
             } else if (resource.container) {
                 summary = tr("%n entries", nullptr, m_file.entryCount());
             } else if (summary.isEmpty()) {
                 summary = conceptText(resource.json.value("code"));
             }
-            if (!expanded || !matchesSearch({m_file.label(index), summary}))
+            const QString label = m_file.label(index, m_redact);
+            if (!expanded || !matchesSearch({label, summary}))
                 continue;
             m_resourceRows << QVariantMap{{"header", false},
                                           {"type", type},
                                           {"resource", index},
-                                          {"label", m_file.label(index)},
+                                          {"label", label},
                                           {"summary", summary},
                                           {"issues", issueCount.value(index)},
                                           {"worst", worst.value(index, 3)}};
@@ -386,10 +401,10 @@ QVariantMap Backend::resourceView(int index, const QString &path) const {
     return {{"text", view.text},
             {"start", range.first},
             {"end", range.second},
-            {"label", m_file.label(index)},
+            {"label", m_file.label(index, m_redact)},
             {"type", resource.type},
             {"location", m_file.location(Issue{Severity::Info, index, QString(), QString(), QString()})},
-            {"fullUrl", resource.fullUrl},
+            {"fullUrl", m_redact ? redactReference(resource.fullUrl) : resource.fullUrl},
             {"issues", notes}};
 }
 
@@ -402,27 +417,18 @@ QVariantList Backend::references(int index) const {
     for (const auto &[path, reference] : found) {
         const int target = m_file.resolve(reference);
         out << QVariantMap{{"path", path},
-                           {"reference", reference},
+                           {"reference", m_redact ? redactReference(reference) : reference},
                            {"target", target},
-                           {"targetLabel", target >= 0 ? m_file.label(target) : QString()},
+                           {"targetLabel", target >= 0 ? m_file.label(target, m_redact) : QString()},
                            {"incoming", false}};
     }
     // What points here, so a Patient leads to its encounters and results.
-    for (int i = 0; i < m_file.resources.size(); ++i) {
-        if (i == index || m_file.resources[i].container)
-            continue;
-        QList<QPair<QString, QString>> theirs;
-        collectReferences(m_file.resources[i].shown, QString(), theirs);
-        for (const auto &[path, reference] : theirs)
-            if (m_file.resolve(reference) == index) {
-                out << QVariantMap{{"path", path},
-                                   {"reference", reference},
-                                   {"target", i},
-                                   {"targetLabel", m_file.label(i)},
-                                   {"incoming", true}};
-                break;
-            }
-    }
+    for (const auto &[source, path] : m_incoming.value(index))
+        out << QVariantMap{{"path", path},
+                           {"reference", QString()},
+                           {"target", source},
+                           {"targetLabel", m_file.label(source, m_redact)},
+                           {"incoming", true}};
     return out;
 }
 
@@ -433,8 +439,8 @@ QVariantMap Backend::eventDetail(int index) const {
     QString patient;
     for (int g = 0; g < m_timeline.groups.size(); ++g)
         if (m_timeline.groups[g].events.contains(index))
-            patient = patientLabel(m_file, m_timeline.groups[g], g + 1, m_redact);
-    QVariantMap detail{{"summary", event.summary},
+            patient = patientLabel(m_file, m_timeline, m_timeline.groups[g], m_redact);
+    QVariantMap detail{{"summary", summaryOf(event, m_redact)},
                        {"type", event.type},
                        {"date", displayDate(event, QLocale())},
                        {"rawDate", event.date},
@@ -443,7 +449,7 @@ QVariantMap Backend::eventDetail(int index) const {
                        {"codeText", event.codeText},
                        {"patient", patient},
                        {"resource", event.resource},
-                       {"label", m_file.label(event.resource)},
+                       {"label", m_file.label(event.resource, m_redact)},
                        {"hasTrend", false}};
     if (m_trends.contains(event.trendKey)) {
         const TrendSeries series = trendSeries(m_timeline, m_trends.value(event.trendKey));

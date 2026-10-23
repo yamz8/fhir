@@ -156,6 +156,7 @@
   "%1 must be an array": "%1 skal være et array",
   "%1 is not one of: %2": "%1 er ikke en af: %2",
   "%1.%2.%3 is required": "%1.%2.%3 er påkrævet",
+  "%1.%2.%3[x] is required": "%1.%2.%3[x] er påkrævet",
   "Patient has neither a name nor an identifier": "Patienten har hverken navn eller id",
   "Observation has no value, component, member, or dataAbsentReason": "Observationen har ingen værdi, komponent, medlem eller dataAbsentReason",
   "Condition has no code, so it doesn't say what the condition is": "Tilstanden har ingen kode, så den siger ikke, hvad tilstanden er"

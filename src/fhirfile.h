@@ -58,7 +58,8 @@ public:
     QString patientReference(int index) const;
     // Where an issue is, for people: "Bundle.entry[3].resource.code", "line 4: Observation.code".
     QString location(const Issue &issue) const;
-    QString label(int index) const; // "Observation/abc"
+    // "Observation/abc"; redacted, a person's id is hidden: "Patient/[redacted]".
+    QString label(int index, bool redacted = false) const;
     int entryCount() const;
 
 private:

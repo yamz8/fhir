@@ -113,6 +113,7 @@ private:
     QList<fhir::Issue> m_issues;
     fhir::Timeline m_timeline;
     QHash<QString, QList<int>> m_trends;
+    QHash<int, QList<QPair<int, QString>>> m_incoming; // target -> (source, path of the reference)
     fhir::Filter m_filter;
     bool m_redact = false;
     bool m_sortBySeverity = true;

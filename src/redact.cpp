@@ -7,8 +7,11 @@
 namespace fhir {
 
 bool isPhiKey(const QString &key) {
+    // Notes, comments, conclusions, and free-text values are written by people
+    // and can name anyone.
     static const QSet<QString> keys = {"name", "identifier", "address", "telecom", "birthDate",
-                                       "deceasedDateTime", "photo", "text"};
+                                       "deceasedDateTime", "photo", "text", "note", "comment",
+                                       "conclusion", "valueString", "patientInstruction"};
     return keys.contains(key);
 }
 
@@ -18,6 +21,21 @@ bool isPhiPath(const QString &path) {
         if (isPhiKey(segment))
             return true;
     return false;
+}
+
+bool isPersonType(const QString &type) {
+    static const QSet<QString> types = {"Patient", "Practitioner", "PractitionerRole", "RelatedPerson", "Person"};
+    return types.contains(type);
+}
+
+QString redactReference(const QString &reference) {
+    static const QRegularExpression person(
+        R"(((?:^|/)(?:Patient|Practitioner|PractitionerRole|RelatedPerson|Person)/)[^/]+((?:/_history/[^/]+)?)$)");
+    QString out = reference;
+    const auto match = person.match(reference);
+    if (match.hasMatch())
+        out.replace(match.capturedStart(), match.capturedLength(), match.captured(1) + kRedacted + match.captured(2));
+    return out;
 }
 
 bool isPersonReference(const QString &key, const QJsonObject &reference) {
@@ -52,12 +70,12 @@ QJsonValue mask(const QJsonValue &value) {
 } // namespace
 
 QJsonValue redact(const QJsonValue &value, const QString &key) {
-    // Narrative text is "text": {"status", "div"}; CodeableConcept.text is a
-    // plain string that says what the code means, and stays.
     if (key == "text" && !value.isObject())
-        return value;
+        return mask(value);
     if (isPhiKey(key))
         return mask(value);
+    if ((key == "reference" || key == "fullUrl") && value.isString())
+        return redactReference(value.toString());
     if (value.isArray()) {
         QJsonArray out;
         for (const auto &item : value.toArray())
@@ -67,8 +85,15 @@ QJsonValue redact(const QJsonValue &value, const QString &key) {
     if (!value.isObject())
         return value;
     QJsonObject object = value.toObject();
-    for (auto it = object.begin(); it != object.end(); ++it)
+    for (auto it = object.begin(); it != object.end(); ++it) {
+        // A CodeableConcept's text says what its codes mean and stays; any
+        // other plain text (Dosage.text, Annotation.text) is free text.
+        if (it.key() == "text" && it.value().isString() && object.contains("coding"))
+            continue;
         it.value() = redact(it.value(), it.key());
+    }
+    if (isPersonType(object.value("resourceType").toString()) && object.contains("id"))
+        object.insert("id", kRedacted);
     // A Reference's display, but not a Coding's, which has a code beside it.
     if (object.contains("display") && !object.contains("code") && isPersonReference(key, object))
         object.insert("display", kRedacted);
