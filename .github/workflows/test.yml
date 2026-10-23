@@ -1,0 +1,26 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Arch, like Omarchy, so the build sees the same Qt.
+    container: archlinux:latest
+    steps:
+      - name: Install Qt and the toolchain
+        run: pacman -Syu --noconfirm --needed base-devel git qt6-base qt6-declarative qt6-svg qt6-wayland
+      - uses: actions/checkout@v4
+      - name: Build
+        run: bin/build
+      - name: Test
+        run: bin/test
+      - name: Check the examples from the command line
+        run: |
+          export QT_QPA_PLATFORM=offscreen
+          build/fhir check examples/synthetic-patients.ndjson
+          ! build/fhir check examples/synthetic-bundle.json
+          build/fhir summary examples/synthetic-bundle.json --json
+          build/fhir timeline examples/synthetic-bundle.json --csv > /dev/null
