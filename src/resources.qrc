@@ -1,0 +1,26 @@
+<RCC>
+    <qresource prefix="/">
+        <file alias="Main.qml">Main.qml</file>
+        <file alias="TimelinePane.qml">TimelinePane.qml</file>
+        <file alias="ResourcesPane.qml">ResourcesPane.qml</file>
+        <file alias="IssuesPane.qml">IssuesPane.qml</file>
+        <file alias="ShortcutsOverlay.qml">ShortcutsOverlay.qml</file>
+        <file alias="FilterPopup.qml">FilterPopup.qml</file>
+        <file alias="TypeIcon.qml">TypeIcon.qml</file>
+        <file alias="JsonPane.qml">JsonPane.qml</file>
+        <file alias="icons/allergy.svg">icons/allergy.svg</file>
+        <file alias="icons/condition.svg">icons/condition.svg</file>
+        <file alias="icons/encounter.svg">icons/encounter.svg</file>
+        <file alias="icons/immunization.svg">icons/immunization.svg</file>
+        <file alias="icons/medication.svg">icons/medication.svg</file>
+        <file alias="icons/observation.svg">icons/observation.svg</file>
+        <file alias="icons/patient.svg">icons/patient.svg</file>
+        <file alias="icons/procedure.svg">icons/procedure.svg</file>
+        <file alias="icons/report.svg">icons/report.svg</file>
+        <file alias="icons/resource.svg">icons/resource.svg</file>
+        <file alias="icons/trend.svg">icons/trend.svg</file>
+        <file alias="skill.md">skill.md</file>
+        <file alias="i18n/en.json">i18n/en.json</file>
+        <file alias="i18n/da.json">i18n/da.json</file>
+    </qresource>
+</RCC>

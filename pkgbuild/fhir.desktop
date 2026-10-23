@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=FHIR
+Name[da]=FHIR
+Comment=Check FHIR R4 files and read them as a patient timeline
+Comment[da]=Tjek FHIR R4-filer og læs dem som en patienttidslinje
+Exec=fhir open %f
+Icon=fhir
+Terminal=false
+Categories=Utility;Development;
+MimeType=application/fhir+json;
+Keywords=FHIR;HL7;health;validator;bundle;ndjson;
+StartupWMClass=fhir

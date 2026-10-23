@@ -1,0 +1,10 @@
+{
+  "%1 · %n resources": { "one": "%1 · %n resource", "other": "%1 · %n resources" },
+  "%n patients": { "one": "%n patient", "other": "%n patients" },
+  "%n events": { "one": "%n event", "other": "%n events" },
+  "%n entries": { "one": "%n entry", "other": "%n entries" },
+  "%n readings with this code": { "one": "%n reading with this code", "other": "%n readings with this code" },
+  "%n errors": { "one": "%n error", "other": "%n errors" },
+  "%n warnings": { "one": "%n warning", "other": "%n warnings" },
+  "%n info": { "one": "%n info", "other": "%n info" }
+}
