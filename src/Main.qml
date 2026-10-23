@@ -38,7 +38,7 @@ ApplicationWindow {
                                    && !activeFocusItem.readOnly
     // Visible rather than opened, which turns true only once the opening animation ends.
     readonly property bool overlayOpen: shortcutsOverlay.visible || filterPopup.visible || exportMenu.visible
-    readonly property bool keysEnabled: backend.loaded && !typing && !overlayOpen
+    readonly property bool keysEnabled: backend.loaded && !backend.loading && !typing && !overlayOpen
 
     function severityColor(severity) {
         return severity === "error" ? errorColor : severity === "warning" ? warningColor : infoColor
@@ -111,6 +111,8 @@ ApplicationWindow {
         onActivated: {
             if (search.activeFocus || search.text.length > 0) {
                 search.text = ""
+                searchPause.stop()
+                backend.searchText = ""
                 content.forceActiveFocus()
             } else if (backend.filtering) {
                 backend.clearFilters()
@@ -226,7 +228,9 @@ ApplicationWindow {
                             font.pixelSize: 13
                             clip: true
                             selectByMouse: true
-                            onTextChanged: backend.searchText = text
+                            // Search once typing pauses, not on every key: a large
+                            // file rebuilds thousands of rows per search.
+                            onTextChanged: searchPause.restart()
                             Keys.onReturnPressed: content.forceActiveFocus()
                             Keys.onEnterPressed: content.forceActiveFocus()
                             Keys.onDownPressed: content.forceActiveFocus()
@@ -336,6 +340,29 @@ ApplicationWindow {
             }
         }
 
+        // A large file takes a few seconds to check; say so instead of looking frozen.
+        Rectangle {
+            visible: backend.loading
+            anchors.fill: parent
+            color: Qt.rgba(0.05, 0.05, 0.06, 0.82)
+            z: 10
+            TapHandler {}
+            ColumnLayout {
+                anchors.centerIn: parent
+                spacing: 14
+                BusyIndicator {
+                    running: backend.loading
+                    Layout.alignment: Qt.AlignHCenter
+                }
+                Label {
+                    text: qsTr("Opening %1…").arg(backend.loadingName)
+                    color: win.textColor
+                    font.pixelSize: 15
+                    Layout.alignment: Qt.AlignHCenter
+                }
+            }
+        }
+
         // A failed open over an open file is said in the window, not dropped.
         Rectangle {
             visible: backend.loaded && backend.loadError.length > 0
@@ -355,6 +382,12 @@ ApplicationWindow {
                 wrapMode: Text.WordWrap
             }
         }
+    }
+
+    Timer {
+        id: searchPause
+        interval: 150
+        onTriggered: backend.searchText = search.text
     }
 
     Menu {

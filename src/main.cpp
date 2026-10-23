@@ -71,7 +71,7 @@ int main(int argc, char *argv[]) {
     Backend backend(&picker);
     QObject::connect(&translator, &Translator::changed, &backend, &Backend::relocalize);
     if (!args.positionalArguments().isEmpty())
-        backend.openPath(args.positionalArguments().first());
+        backend.openInBackground(args.positionalArguments().first());
     backend.setRedact(args.isSet("redact"));
 
     qmlRegisterType<TrendChart>("Fhir", 1, 0, "TrendChart");
@@ -88,17 +88,23 @@ int main(int argc, char *argv[]) {
     if (engine.rootObjects().isEmpty())
         return 1;
     QObject *window = engine.rootObjects().first();
-    if (args.isSet("view"))
-        QMetaObject::invokeMethod(window, "showView", Q_ARG(QVariant, args.value("view")));
-    if (args.isSet("select"))
-        QMetaObject::invokeMethod(window, "selectRow", Q_ARG(QVariant, args.value("select").toInt()));
-
-    if (args.isSet("screenshot")) {
-        QTimer::singleShot(1200, &app, [&] {
-            auto quick = qobject_cast<QQuickWindow *>(window);
-            const bool ok = quick && quick->grabWindow().save(args.value("screenshot"));
-            app.exit(ok ? 0 : 1);
-        });
-    }
+    // The view, selection, and screenshot apply once the file has opened.
+    auto ready = [&] {
+        if (args.isSet("view"))
+            QMetaObject::invokeMethod(window, "showView", Q_ARG(QVariant, args.value("view")));
+        if (args.isSet("select"))
+            QMetaObject::invokeMethod(window, "selectRow", Q_ARG(QVariant, args.value("select").toInt()));
+        if (args.isSet("screenshot")) {
+            QTimer::singleShot(1200, &app, [&] {
+                auto quick = qobject_cast<QQuickWindow *>(window);
+                const bool ok = quick && quick->grabWindow().save(args.value("screenshot"));
+                app.exit(ok ? 0 : 1);
+            });
+        }
+    };
+    if (backend.loading())
+        QObject::connect(&backend, &Backend::loadingChanged, &app, ready, Qt::SingleShotConnection);
+    else
+        ready();
     return app.exec();
 }

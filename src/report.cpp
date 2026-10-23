@@ -26,7 +26,8 @@ QString tr(const char *text) {
 QString csvField(QString value) {
     if (!value.isEmpty() && QStringLiteral("=+-@\t\r").contains(value.front()))
         value.prepend('\'');
-    if (value.contains(QRegularExpression(R"([",\n\r])")))
+    static const QRegularExpression special(R"([",\n\r])");
+    if (value.contains(special))
         value = '"' + value.replace('"', "\"\"") + '"';
     return value;
 }
@@ -236,7 +237,8 @@ QList<Block> layoutTimeline(const File &file, const Timeline &timeline, const Fi
                         p->setFont(title);
                         p->setPen(ink);
                         p->drawText(QRectF(r.left(), r.top(), r.width(), QFontMetricsF(title).height()),
-                                    Qt::AlignLeft | Qt::AlignVCenter, tr("Timeline: %1").arg(name));
+                                    Qt::AlignLeft | Qt::AlignVCenter,
+                                    QFontMetricsF(title).elidedText(tr("Timeline: %1").arg(name), Qt::ElideMiddle, r.width()));
                         p->setFont(small);
                         p->setPen(muted);
                         p->drawText(QRectF(r.left(), r.top() + QFontMetricsF(title).height() + line * 0.3, r.width(), line),

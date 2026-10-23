@@ -17,7 +17,8 @@ following the desktop theme and language.
 
 - **Opens** `.json` resources and Bundles and `.ndjson` bulk-export files,
   through the desktop's file picker or by dropping a file on the window. The
-  source file is only ever read.
+  source file is only ever read. Large files open in the background; a 53 MB
+  Synthea bundle (19,000 resources) checks in about two seconds.
 - **Checks structure**: valid JSON; `resourceType` present and a known R4
   type; required elements and required code sets (`status`, `intent`,
   `gender`, …) for Patient, Encounter, Observation, Condition,
@@ -83,6 +84,10 @@ fhir skill install                   # an agent skill in ~/.agents/skills/fhir
 ```
 
 Add `--redact` to any command to mask identifying details in its output.
+
+Transaction bundles and bulk exports can hold thousands of conditional
+references (`Location?identifier=…`) and references to other files; each kind
+is counted in one line rather than listed one by one.
 
 `examples/` has a synthetic Bundle (two made-up patients, four deliberate
 errors) and an NDJSON export to try it on.

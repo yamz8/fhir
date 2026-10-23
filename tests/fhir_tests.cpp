@@ -206,6 +206,10 @@ private slots:
         const File missing = loaded(QJsonObject{{"id", "x"}});
         QVERIFY(has(validate(missing), Severity::Error, "", "resourceType is missing"));
 
+        File empty;
+        empty.loadData("  \n", "empty.json");
+        QVERIFY(has(validate(empty), Severity::Error, "", "The file is empty"));
+
         File bad;
         bad.loadData("{\n  \"resourceType\": \"Patient\",\n  \"id\": \n}", "bad.json");
         const QList<Issue> issues = validate(bad);
@@ -228,7 +232,8 @@ private slots:
         QCOMPARE(file.resources[2].line, 5);
         const QList<Issue> issues = validate(file);
         QVERIFY2(has(issues, Severity::Error, "", "Invalid JSON at line 3"), qPrintable(dump(issues)));
-        QVERIFY(has(issues, Severity::Info, "subject.reference", "not in this file"));
+        // One line for every reference to another file, not one per reference.
+        QVERIFY2(has(issues, Severity::Info, "", "References to resources outside this file, not checked: 1"), qPrintable(dump(issues)));
         QCOMPARE(file.patientOf(1), 0);
         QCOMPARE(file.location(Issue{Severity::Error, 1, "code", {}, {}}), QString("line 2: Observation.code"));
 
@@ -281,19 +286,23 @@ private slots:
             {"resourceType", "Observation"}, {"id", "bp"}, {"status", "final"},
             {"code", coded("http://loinc.org", "85354-9", "Blood pressure panel", "Blood pressure")},
             {"subject", QJsonObject{{"reference", kTestPatient}}}, {"effectiveDateTime", "2024-01-01"},
-            {"component", QJsonArray{QJsonObject{{"code", coded("http://loinc.org", "8480-6", "Systolic")},
-                                                 {"valueQuantity", QJsonObject{{"value", 120}, {"unit", "mmHg"}}}},
-                                     QJsonObject{{"code", coded("http://loinc.org", "8462-4", "Diastolic")},
-                                                 {"valueQuantity", QJsonObject{{"value", 80}, {"unit", "mmHg"}}}}}}};
+            // Diastolic first and UCUM units, as Synthea writes them.
+            {"component", QJsonArray{QJsonObject{{"code", coded("http://loinc.org", "8462-4", "Diastolic")},
+                                                 {"valueQuantity", QJsonObject{{"value", 80}, {"unit", "mm[Hg]"}}}},
+                                     QJsonObject{{"code", coded("http://loinc.org", "8480-6", "Systolic")},
+                                                 {"valueQuantity", QJsonObject{{"value", 120}, {"unit", "mm[Hg]"}}}}}}};
+        QJsonObject score = observation(kTestPatient, "2024-01-02", 3, "70274-6", "GAD-7 total score", "{score}");
+        score.insert("id", "score");
         const File file = loaded(bundle({entry(kTestPatient, testPatient()), entry(uuid(60), metformin),
                                          entry(uuid(61), observation(kTestPatient, "2024-01-01", 7.2)),
-                                         entry(uuid(62), pressure)}));
+                                         entry(uuid(62), pressure), entry(uuid(63), score)}));
         QStringList summaries;
         for (const auto &event : buildTimeline(file).events)
             summaries << event.summary;
         QVERIFY2(summaries.contains("Metformin 500 mg PO BID"), qPrintable(summaries.join(" | ")));
         QVERIFY(summaries.contains("Hemoglobin A1c 7.2 %"));
         QVERIFY(summaries.contains("Blood pressure 120/80 mmHg"));
+        QVERIFY(summaries.contains("GAD-7 total score 3"));
         QVERIFY(validate(file).isEmpty());
     }
 
@@ -595,6 +604,31 @@ private slots:
         QCOMPARE(issues.last().resource, 4);
     }
 
+    void syntheaShapesAreAccepted()
+    {
+        // Synthea writes transaction bundles with Device.expirationDate as a
+        // dateTime and many conditional references to Locations and Practitioners.
+        const QJsonObject device{{"resourceType", "Device"}, {"id", "d1"},
+                                 {"expirationDate", "2042-05-17T08:01:15+00:00"},
+                                 {"patient", QJsonObject{{"reference", kTestPatient}}}};
+        QJsonObject encounter{{"resourceType", "Encounter"}, {"id", "e1"}, {"status", "finished"},
+                              {"class", QJsonObject{{"code", "AMB"}}},
+                              {"subject", QJsonObject{{"reference", kTestPatient}}},
+                              {"location", QJsonArray{QJsonObject{{"location", QJsonObject{{"reference", "Location?identifier=x|1"}}}}}},
+                              {"serviceProvider", QJsonObject{{"reference", "Organization?identifier=x|2"}}}};
+        QJsonArray entries{entry(kTestPatient, testPatient()), entry(uuid(200), device), entry(uuid(201), encounter)};
+        for (int i = 0; i < entries.size(); ++i) {
+            QJsonObject e = entries[i].toObject();
+            e.insert("request", QJsonObject{{"method", "POST"}, {"url", e.value("resource").toObject().value("resourceType")}});
+            entries[i] = e;
+        }
+        const QList<Issue> issues = validate(loaded(bundle(entries, "transaction")));
+        QCOMPARE(issues.size(), 1);
+        QCOMPARE(issues.first().severity, Severity::Info);
+        QCOMPARE(issues.first().resource, -1);
+        QVERIFY2(issues.first().message.endsWith("left for the server to resolve: 2"), qPrintable(dump(issues)));
+    }
+
     void svgExportFollowsTheChoiceNotTheName()
     {
         QTemporaryDir dir;
@@ -608,6 +642,34 @@ private slots:
         QFile svg(dir.filePath("timeline")), pdf(dir.filePath("printout"));
         QVERIFY(svg.open(QIODevice::ReadOnly) && svg.readAll().contains("<svg"));
         QVERIFY(pdf.open(QIODevice::ReadOnly) && pdf.read(4) == "%PDF");
+    }
+
+    void opensInTheBackground()
+    {
+        QTemporaryDir dir;
+        write(dir.filePath("first.json"), QJsonDocument(bundle({entry(kTestPatient, testPatient())})).toJson());
+        write(dir.filePath("second.json"), QJsonDocument(bundle({entry(kTestPatient, testPatient()),
+                                                                 entry(uuid(210), observation(kTestPatient, "2024-01-01", 7))}))
+                                               .toJson());
+        Backend backend;
+        backend.openInBackground(dir.filePath("first.json"));
+        QVERIFY(backend.loading());
+        // A second open replaces the first; only its result lands.
+        backend.openInBackground(dir.filePath("second.json"));
+        // Whoever waits for loading to end finds the file already there.
+        int resourcesWhenDone = -1;
+        connect(&backend, &Backend::loadingChanged, this, [&] {
+            if (!backend.loading() && resourcesWhenDone < 0)
+                resourcesWhenDone = backend.resourceCount();
+        });
+        QTRY_VERIFY(!backend.loading());
+        QCOMPARE(resourcesWhenDone, 2);
+        QCOMPARE(backend.fileName(), QString("second.json"));
+        QCOMPARE(backend.resourceCount(), 2);
+        backend.openInBackground(dir.filePath("missing.json"));
+        QTRY_VERIFY(!backend.loading());
+        QVERIFY(!backend.loadError().isEmpty());
+        QCOMPARE(backend.fileName(), QString("second.json"));
     }
 
     void incomingReferencesAreIndexed()

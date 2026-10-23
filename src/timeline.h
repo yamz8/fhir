@@ -31,6 +31,7 @@ struct Event {
     double value = 0;
     bool numeric = false;
     QString unit, codeText;
+    QString searchText; // what search looks in: summary, type, status, and codes
 };
 
 struct PatientGroup {

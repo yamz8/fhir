@@ -2,9 +2,11 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QFutureWatcher>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QStandardPaths>
+#include <QtConcurrentRun>
 #include <algorithm>
 
 #include "filepicker.h"
@@ -83,38 +85,59 @@ int Backend::patientCount() const {
     return count;
 }
 
-bool Backend::openPath(const QString &path) {
+// Everything worked out from a file, built off the UI thread for large files.
+struct Backend::Opened {
     File file;
-    if (!file.load(path)) {
-        m_loadError = tr("Could not open %1: %2").arg(QFileInfo(path).fileName(), file.error);
+    QList<Issue> issues;
+    Timeline timeline;
+    QHash<QString, QList<int>> trends;
+    QHash<int, QList<QPair<int, QString>>> incoming;
+    bool ok = false;
+};
+
+Backend::Opened Backend::openFile(const QString &path, const QLocale &locale) {
+    Opened opened;
+    if (!opened.file.load(path))
+        return opened;
+    opened.ok = true;
+    opened.issues = validate(opened.file);
+    opened.timeline = buildTimeline(opened.file, locale);
+    opened.trends = trends(opened.timeline);
+    // What points at each resource, found once here rather than on every selection.
+    const File &file = opened.file;
+    for (int i = 0; i < file.resources.size(); ++i) {
+        if (file.resources[i].container)
+            continue;
+        QList<QPair<QString, QString>> found;
+        collectReferences(file.resources[i].shown, QString(), found);
+        QSet<int> targets;
+        for (const auto &[path, reference] : found) {
+            const int target = file.resolve(reference);
+            if (target >= 0 && target != i && !targets.contains(target)) {
+                targets.insert(target);
+                opened.incoming[target] << qMakePair(i, path);
+            }
+        }
+    }
+    return opened;
+}
+
+bool Backend::apply(Opened &&opened, const QString &path) {
+    if (!opened.ok) {
+        m_loadError = tr("Could not open %1: %2").arg(QFileInfo(path).fileName(), opened.file.error);
         emit fileChanged();
         return false;
     }
     m_loadError.clear();
-    m_file = file;
-    m_issues = validate(m_file);
+    m_file = std::move(opened.file);
+    m_issues = std::move(opened.issues);
     const IssueCounts counts = countIssues(m_issues);
     m_errors = counts.errors;
     m_warnings = counts.warnings;
     m_infos = counts.infos;
-    m_timeline = buildTimeline(m_file, QLocale());
-    m_trends = trends(m_timeline);
-    // What points at each resource, found once here rather than on every selection.
-    m_incoming.clear();
-    for (int i = 0; i < m_file.resources.size(); ++i) {
-        if (m_file.resources[i].container)
-            continue;
-        QList<QPair<QString, QString>> found;
-        collectReferences(m_file.resources[i].shown, QString(), found);
-        QSet<int> targets;
-        for (const auto &[path, reference] : found) {
-            const int target = m_file.resolve(reference);
-            if (target >= 0 && target != i && !targets.contains(target)) {
-                targets.insert(target);
-                m_incoming[target] << qMakePair(i, path);
-            }
-        }
-    }
+    m_timeline = std::move(opened.timeline);
+    m_trends = std::move(opened.trends);
+    m_incoming = std::move(opened.incoming);
     m_filter = Filter();
     m_collapsed.clear();
     emit fileChanged();
@@ -126,8 +149,32 @@ bool Backend::openPath(const QString &path) {
     return true;
 }
 
+bool Backend::openPath(const QString &path) {
+    ++m_generation;
+    return apply(openFile(path, QLocale()), path);
+}
+
+void Backend::openInBackground(const QString &path) {
+    // A newer open replaces one still running; its result is dropped.
+    const int generation = ++m_generation;
+    m_loadingName = QFileInfo(path).fileName();
+    m_loading = true;
+    emit loadingChanged();
+    auto *watcher = new QFutureWatcher<Opened>(this);
+    connect(watcher, &QFutureWatcher<Opened>::finished, this, [this, watcher, path, generation] {
+        watcher->deleteLater();
+        if (generation != m_generation)
+            return;
+        // The data lands before loading ends, so whoever waits on loading sees it.
+        apply(watcher->future().takeResult(), path);
+        m_loading = false;
+        emit loadingChanged();
+    });
+    watcher->setFuture(QtConcurrent::run(&Backend::openFile, path, QLocale()));
+}
+
 void Backend::openUrl(const QUrl &url) {
-    openPath(url.isLocalFile() ? url.toLocalFile() : url.toString());
+    openInBackground(url.isLocalFile() ? url.toLocalFile() : url.toString());
 }
 
 void Backend::requestOpen() {

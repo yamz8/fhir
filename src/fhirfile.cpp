@@ -201,6 +201,10 @@ void File::loadData(const QByteArray &data, const QString &name) {
         return;
     }
 
+    if (data.trimmed().isEmpty()) {
+        parseIssues << Issue{Severity::Error, -1, QString(), tr("The file is empty"), QString()};
+        return;
+    }
     if (parseError.error != QJsonParseError::NoError) {
         addParseError(parseError, data, 0, 0);
         return;

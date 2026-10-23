@@ -20,17 +20,22 @@ QString number(double value, const QLocale &locale) {
     return locale.toString(value, 'g', QLocale::FloatingPointShortest);
 }
 
+// The unit as people write it: UCUM's mm[Hg] is mmHg, and annotations such
+// as {score} say nothing a reader needs.
+QString unitOf(const QJsonObject &q) {
+    QString unit = !q.value("unit").toString().isEmpty() ? q.value("unit").toString() : q.value("code").toString();
+    if (unit.startsWith('{') && unit.endsWith('}'))
+        return {};
+    return unit.replace("[Hg]", "Hg").replace("[H2O]", "H2O");
+}
+
 QString quantity(const QJsonObject &q, const QLocale &locale) {
     if (!q.value("value").isDouble())
         return {};
-    const QString unit = !q.value("unit").toString().isEmpty() ? q.value("unit").toString() : q.value("code").toString();
+    const QString unit = unitOf(q);
     return (q.value("comparator").toString() + number(q.value("value").toDouble(), locale) +
             (unit.isEmpty() ? QString() : " " + unit))
         .trimmed();
-}
-
-QString unitOf(const QJsonObject &q) {
-    return !q.value("unit").toString().isEmpty() ? q.value("unit").toString() : q.value("code").toString();
 }
 
 QString reference(const File &file, const QJsonValue &value) {
@@ -77,8 +82,17 @@ QString observationSummary(const QJsonObject &o, const QLocale &locale, bool red
         QStringList numbers, parts;
         QString unit;
         bool shared = true;
-        for (const auto &item : components) {
-            const QJsonObject component = item.toObject();
+        // Systolic before diastolic, whatever order the file lists them in.
+        QList<QJsonObject> ordered;
+        for (const auto &item : components)
+            ordered << item.toObject();
+        auto rank = [](const QJsonObject &component) {
+            const QStringList codes = conceptCodes(component.value("code"));
+            return codes.contains("http://loinc.org|8480-6") ? 0 : codes.contains("http://loinc.org|8462-4") ? 1 : 2;
+        };
+        std::stable_sort(ordered.begin(), ordered.end(),
+                         [&](const QJsonObject &a, const QJsonObject &b) { return rank(a) < rank(b); });
+        for (const auto &component : ordered) {
             const QJsonObject q = component.value("valueQuantity").toObject();
             if (!q.value("value").isDouble() || (!unit.isEmpty() && unitOf(q) != unit))
                 shared = false;
@@ -268,6 +282,9 @@ Timeline buildTimeline(const File &file, const QLocale &locale) {
                 if (!code.isEmpty())
                     event.trendKey = event.patientKey + "\n" + code + "\n" + event.unit;
             }
+            event.searchText = QStringList{event.summary, event.type, event.status, event.codeText,
+                                           event.codes.join(' ')}
+                                   .join('\n');
             events << event;
             break;
         }
@@ -352,14 +369,10 @@ bool Filter::matches(const File &file, const Event &event) const {
         if (patient != id && patient != event.patientKey && !event.patientKey.endsWith("/" + patient))
             return false;
     }
-    if (!text.isEmpty()) {
-        const QString haystack = QStringList{event.summary, event.type, event.status, event.codeText,
-                                             event.codes.join(' ')}
-                                     .join('\n');
+    if (!text.isEmpty())
         for (const auto &word : text.split(' ', Qt::SkipEmptyParts))
-            if (!haystack.contains(word, Qt::CaseInsensitive))
+            if (!event.searchText.contains(word, Qt::CaseInsensitive))
                 return false;
-    }
     return true;
 }
 

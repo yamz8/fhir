@@ -1,4 +1,4 @@
-QT += core gui qml quick quickcontrols2 dbus svg
+QT += core gui qml quick quickcontrols2 dbus svg concurrent
 
 CONFIG += c++17 release
 TARGET = fhir

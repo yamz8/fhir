@@ -21,6 +21,12 @@ const QString kDay = "(0[1-9]|[1-2][0-9]|3[0-1])";
 const QString kTime = "([01][0-9]|2[0-3]):[0-5][0-9]:([0-5][0-9]|60)(\\.[0-9]+)?";
 const QString kZone = "(Z|(\\+|-)((0[0-9]|1[0-3]):[0-5][0-9]|14:00))";
 
+// Compiled once; the walk asks it of every system and reference.
+const QRegularExpression &whitespace() {
+    static const QRegularExpression re("\\s");
+    return re;
+}
+
 // The regex allows Feb 30; the calendar doesn't.
 bool calendarDay(const QString &value) {
     if (value.size() < 10)
@@ -75,16 +81,17 @@ enum class Format { None, Date, DateTime, Instant };
 
 // The format of a primitive, from its name, as R4 types them. Names that
 // mean different things in different resources are left alone.
-Format formatOf(const QString &key, const QString &parentKey) {
+Format formatOf(const QString &key, const QString &parentKey, const QString &resourceType) {
     static const QSet<QString> dates = {"birthDate"};
     static const QSet<QString> instants = {"issued", "lastUpdated", "timestamp"};
     static const QSet<QString> dateTimes = {"recordedDate", "authoredOn", "lastOccurrence", "date",
                                             "dateAsserted", "dateWritten"};
     if (dates.contains(key))
         return Format::Date;
-    // Immunization.expirationDate is a date; Medication.batch.expirationDate a dateTime.
+    // Immunization.expirationDate is a date; Device.expirationDate and
+    // Medication.batch.expirationDate are dateTimes.
     if (key == "expirationDate")
-        return parentKey == "batch" ? Format::DateTime : Format::Date;
+        return resourceType == "Immunization" && parentKey.isEmpty() ? Format::Date : Format::DateTime;
     if (instants.contains(key) || key.endsWith("Instant"))
         return Format::Instant;
     if (dateTimes.contains(key) || key.endsWith("DateTime"))
@@ -123,6 +130,19 @@ public:
                 seen.insert(key, i);
             }
         }
+        if (m_conditional > 0)
+            m_issues << Issue{Severity::Info, -1, QString(),
+                              QCoreApplication::translate(
+                                  "Validator",
+                                  "Conditional references (Type?search), left for the server to resolve: %n",
+                                  nullptr, m_conditional),
+                              QString()};
+        if (m_outside > 0)
+            m_issues << Issue{Severity::Info, -1, QString(),
+                              QCoreApplication::translate(
+                                  "Validator", "References to resources outside this file, not checked: %n",
+                                  nullptr, m_outside),
+                              QString()};
         return m_issues;
     }
 
@@ -233,10 +253,12 @@ private:
         } else if (!topLevel) {
             add(Severity::Error, path, tr("A contained resource needs an id"));
         }
+        // Formats depend on the resource type, so set it before the walk.
+        if (topLevel)
+            m_type = type;
         checkElement(json, path, QString(), {});
         if (!topLevel)
             return;
-        m_type = type;
         Rules rules{*this, json, path};
         rules.check(type);
     }
@@ -270,7 +292,7 @@ private:
             !isValidCode(object.value("code").toString()))
             add(Severity::Error, childPath(path, "code"), tr("code has leading, trailing, or repeated whitespace"),
                 object.value("code").toString());
-        if (object.value("system").isString() && object.value("system").toString().contains(QRegularExpression("\\s")))
+        if (object.value("system").isString() && object.value("system").toString().contains(whitespace()))
             add(Severity::Error, childPath(path, "system"), tr("system must be a URI without whitespace"),
                 object.value("system").toString());
         if (key.endsWith("Quantity") && object.contains("value") && !object.value("value").isDouble())
@@ -313,14 +335,14 @@ private:
             checkElement(value.toObject(), path, key, {});
             return;
         default:
-            if (formatOf(key, parentKey) != Format::None)
+            if (formatOf(key, parentKey, m_type) != Format::None)
                 add(Severity::Error, path, tr("%1 must be a string").arg(key));
             return;
         }
     }
 
     void checkFormat(const QString &text, const QString &key, const QString &path, const QString &parentKey) {
-        switch (formatOf(key, parentKey)) {
+        switch (formatOf(key, parentKey, m_type)) {
         case Format::Date:
             if (!isValidDate(text))
                 add(Severity::Error, path, tr("%1 is not a valid FHIR date (YYYY, YYYY-MM, or YYYY-MM-DD)").arg(key),
@@ -345,7 +367,7 @@ private:
     void checkReference(const QString &reference, const QString &path) {
         if (reference.isEmpty())
             return; // Reported as an empty string.
-        if (reference.contains(QRegularExpression("\\s"))) {
+        if (reference.contains(whitespace())) {
             add(Severity::Error, path, tr("Reference contains whitespace"), reference);
             return;
         }
@@ -354,8 +376,10 @@ private:
                 add(Severity::Error, path, tr("Reference points at a contained resource that isn't there"), reference);
             return;
         }
+        // Transaction bundles (Synthea's among them) can hold thousands of
+        // these; they are counted and reported once rather than one by one.
         if (reference.contains('?')) {
-            add(Severity::Info, path, tr("Conditional reference; resolved by the server, not checked here"), reference);
+            ++m_conditional;
             return;
         }
         const bool inFile = m_file.kind == File::Kind::Bundle || m_file.kind == File::Kind::Ndjson;
@@ -389,7 +413,7 @@ private:
         if (m_file.kind == File::Kind::Bundle && match.hasMatch())
             add(Severity::Warning, path, tr("Reference does not resolve within this Bundle"), reference);
         else
-            add(Severity::Info, path, tr("Reference is not in this file"), reference);
+            ++m_outside; // Normal in bulk export, where each type has its own file; reported once.
     }
 
     // Required elements, their JSON shapes, and required code sets for the
@@ -598,6 +622,7 @@ private:
     int m_index = -1;
     QString m_base, m_type;
     QSet<QString> m_contained;
+    int m_conditional = 0, m_outside = 0;
 };
 
 } // namespace

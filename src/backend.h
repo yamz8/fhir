@@ -36,6 +36,8 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList resourceRows READ resourceRows NOTIFY rowsChanged)
     Q_PROPERTY(QVariantList issueRows READ issueRows NOTIFY issuesChanged)
     Q_PROPERTY(QString message READ message NOTIFY messageChanged)
+    Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
+    Q_PROPERTY(QString loadingName READ loadingName NOTIFY loadingChanged)
 
 public:
     explicit Backend(FilePicker *picker = nullptr, QObject *parent = nullptr);
@@ -67,7 +69,12 @@ public:
     QVariantList issueRows() const { return m_issueRows; }
     QString message() const { return m_message; }
 
+    // Opens and checks a file before returning, as tests and scripts want.
     Q_INVOKABLE bool openPath(const QString &path);
+    // Opens a file on a worker thread, so a large one doesn't freeze the window.
+    Q_INVOKABLE void openInBackground(const QString &path);
+    bool loading() const { return m_loading; }
+    QString loadingName() const { return m_loadingName; }
     Q_INVOKABLE void openUrl(const QUrl &url);
     Q_INVOKABLE void requestOpen();
     // kind is issues-json, issues-csv, timeline-csv, timeline-pdf, or timeline-svg.
@@ -100,8 +107,12 @@ signals:
     void rowsChanged();
     void issuesChanged();
     void messageChanged();
+    void loadingChanged();
 
 private:
+    struct Opened;
+    static Opened openFile(const QString &path, const QLocale &locale);
+    bool apply(Opened &&opened, const QString &path);
     bool matchesSearch(const QStringList &fields) const;
     void rebuildTimelineRows();
     void rebuildResourceRows();
@@ -120,5 +131,8 @@ private:
     QSet<QString> m_collapsed;
     QString m_loadError, m_message, m_pendingExport;
     int m_errors = 0, m_warnings = 0, m_infos = 0;
+    int m_generation = 0;
+    bool m_loading = false;
+    QString m_loadingName;
     QVariantList m_timelineRows, m_timelineTypes, m_resourceRows, m_issueRows;
 };
