@@ -1,5 +1,10 @@
 #include <QDir>
 #include <QFile>
+#include <QQmlApplicationEngine>
+#include <QQmlContext>
+#include <QQmlExpression>
+#include <QQuickStyle>
+#include <QQuickWindow>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QTemporaryDir>
@@ -14,6 +19,7 @@
 #include "theme.h"
 #include "timeline.h"
 #include "translator.h"
+#include "trendchart.h"
 #include "validator.h"
 
 using namespace fhir;
@@ -766,6 +772,111 @@ private slots:
         const QVariantList fromObservation = backend.references(2);
         QCOMPARE(fromObservation.size(), 1);
         QCOMPARE(fromObservation.first().toMap().value("target").toInt(), 1);
+    }
+
+    // The real window, offscreen, driven from the keyboard as a person would.
+    void windowDrivesFromTheKeyboard()
+    {
+        QTemporaryDir dir;
+        write(dir.filePath("language"), "en\n");
+        QQuickStyle::setStyle("Material");
+        Translator translator(dir.filePath("language"));
+        Theme theme(dir.filePath("no-omarchy"));
+        Backend backend;
+        QVERIFY(backend.openPath(QFINDTESTDATA("../examples/synthetic-bundle.json")));
+        qmlRegisterType<TrendChart>("Fhir", 1, 0, "TrendChart");
+        QQmlApplicationEngine engine;
+        QStringList warnings;
+        connect(&engine, &QQmlEngine::warnings, this, [&](const QList<QQmlError> &errors) {
+            for (const auto &error : errors)
+                warnings << error.toString();
+        });
+        engine.rootContext()->setContextProperty("translator", &translator);
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.load(QUrl("qrc:/Main.qml"));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(window);
+        window->show();
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto eval = [&](const QString &js) { return QQmlExpression(qmlContext(window), window, js).evaluate(); };
+        auto key = [&](int k, Qt::KeyboardModifiers m = Qt::NoModifier) {
+            QTest::keyClick(window, Qt::Key(k), m);
+            QTest::qWait(30);
+        };
+        auto letter = [&](char c) {
+            QTest::keyClick(window, c);
+            QTest::qWait(30);
+        };
+
+        // The first event is selected, and J and K move between events.
+        QCOMPARE(eval("timelinePane.currentRow").toInt(), 1);
+        letter('j'); letter('j'); letter('j');
+        QCOMPARE(eval("timelinePane.current.summary").toString(), QString("Hemoglobin A1c 7.9 %"));
+        QVERIFY(eval("timelinePane.detail.hasTrend").toBool());
+        letter('k');
+
+        // Enter opens the resource, and its references can be followed and walked back.
+        key(Qt::Key_Return);
+        QCOMPARE(eval("view").toInt(), 1);
+        QCOMPARE(eval("resourcesPane.current.label").toString(), QString("Encounter/000000000101"));
+        key(Qt::Key_Return);
+        QCOMPARE(eval("resourcesPane.current.label").toString(), QString("Patient/test-patient"));
+        key(Qt::Key_Backspace);
+        QCOMPARE(eval("resourcesPane.current.label").toString(), QString("Encounter/000000000101"));
+        key(Qt::Key_Backspace);
+        QCOMPARE(eval("view").toInt(), 0);
+
+        // An issue jumps to its resource with the path highlighted.
+        key(Qt::Key_Tab); key(Qt::Key_Tab);
+        QCOMPARE(eval("view").toInt(), 2);
+        QCOMPARE(eval("issuesPane.rows.count").toInt(), 4);
+        letter('j');
+        key(Qt::Key_Return);
+        QCOMPARE(eval("resourcesPane.highlightPath").toString(), QString("resource.subject.reference"));
+        QVERIFY(eval("resourcesPane.shown.end > resourcesPane.shown.start").toBool());
+
+        // P redacts what the window shows.
+        letter('p');
+        QVERIFY(backend.redact());
+        QVERIFY(!eval("resourcesPane.shown.text").toString().contains("Sampletown"));
+        letter('p');
+
+        // Search takes text, Q included, without quitting.
+        letter('1');
+        letter('/');
+        QVERIFY(eval("typing").toBool());
+        for (char c : QByteArray("a1c q"))
+            letter(c);
+        QTRY_COMPARE(backend.searchText(), QString("a1c q"));
+        key(Qt::Key_Escape);
+        QCOMPARE(backend.searchText(), QString());
+        QVERIFY(!eval("typing").toBool());
+
+        // F, ?, and Ctrl+E open their overlays, and Esc closes each.
+        for (const auto &[open, visible] : {std::pair{0, "filterPopup.visible"}, std::pair{1, "shortcutsOverlay.visible"},
+                                           std::pair{2, "exportMenu.visible"}}) {
+            if (open == 0) letter('f');
+            else if (open == 1) letter('?');
+            else key(Qt::Key_E, Qt::ControlModifier);
+            QTRY_VERIFY2(eval(visible).toBool(), visible);
+            key(Qt::Key_Escape);
+            QTRY_VERIFY2(!eval(visible).toBool(), visible);
+        }
+
+        // Space hides the detail pane; Enter on a type heading folds it.
+        key(Qt::Key_Space);
+        QVERIFY(!eval("detailVisible").toBool());
+        key(Qt::Key_Space);
+        key(Qt::Key_Tab);
+        key(Qt::Key_Home);
+        const int rows = eval("resourcesPane.rows.count").toInt();
+        key(Qt::Key_Return);
+        QCOMPARE(eval("resourcesPane.rows.count").toInt(), rows - 1);
+        key(Qt::Key_Return);
+        QCOMPARE(eval("resourcesPane.rows.count").toInt(), rows);
+        QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join('\n')));
     }
 
     void themeFallsBack()
