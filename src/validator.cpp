@@ -83,7 +83,12 @@ enum class Format { None, Date, DateTime, Instant };
 // mean different things in different resources are left alone.
 Format formatOf(const QString &key, const QString &parentKey, const QString &resourceType) {
     static const QSet<QString> dates = {"birthDate"};
-    static const QSet<QString> instants = {"issued", "lastUpdated", "timestamp"};
+    static const QSet<QString> instants = {"lastUpdated", "timestamp"};
+    // issued is an instant in Observation, DiagnosticReport, and Media, and a
+    // dateTime elsewhere (Contract.issued).
+    if (key == "issued")
+        return QStringList{"Observation", "DiagnosticReport", "Media"}.contains(resourceType) ? Format::Instant
+                                                                                              : Format::DateTime;
     static const QSet<QString> dateTimes = {"recordedDate", "authoredOn", "lastOccurrence", "date",
                                             "dateAsserted", "dateWritten"};
     if (dates.contains(key))
@@ -107,8 +112,10 @@ public:
 
     QList<Issue> run() {
         m_issues = m_file.parseIssues;
-        if (m_file.kind == File::Kind::Bundle)
+        if (m_file.kind == File::Kind::Bundle) {
+            m_bundleType = m_file.resources.first().json.value("type").toString();
             checkBundle();
+        }
         QHash<QString, int> seen;
         for (int i = 0; i < m_file.resources.size(); ++i) {
             const Resource &resource = m_file.resources[i];
@@ -124,7 +131,7 @@ public:
             checkResource(resource.json, m_base, true);
             const QString key = resource.type + "/" + resource.id;
             if (!resource.id.isEmpty() && !resource.type.isEmpty()) {
-                if (seen.contains(key))
+                if (seen.contains(key) && !differentVersions(seen.value(key), i))
                     add(Severity::Warning, childPath(m_base, "id"),
                         tr("%1 appears more than once in this file").arg(key));
                 seen.insert(key, i);
@@ -149,6 +156,16 @@ public:
 private:
     void add(Severity severity, const QString &path, const QString &message, const QString &value = {}) {
         m_issues << Issue{severity, m_index, path, message, value};
+    }
+
+    // The same resource may appear twice in a history bundle, or as two
+    // versions with different meta.versionId (R4 bdl-7).
+    bool differentVersions(int a, int b) const {
+        if (m_bundleType == "history")
+            return true;
+        const QString first = m_file.resources[a].json.value("meta").toObject().value("versionId").toString();
+        const QString second = m_file.resources[b].json.value("meta").toObject().value("versionId").toString();
+        return !first.isEmpty() && !second.isEmpty() && first != second;
     }
 
     void checkBundle() {
@@ -180,17 +197,23 @@ private:
             for (auto it = entry.begin(); it != entry.end(); ++it)
                 if (it.key() != "resource")
                     checkValue(it.value(), it.key(), it.key(), QString());
-            if (resource.resourcePath.isEmpty()) {
-                const bool response = type.endsWith("-response") || type == "history";
-                add(response ? Severity::Info : Severity::Error, "resource",
-                    response ? tr("Entry has no resource") : tr("Entry has no resource object"));
-            }
+            // Reads and deletes in a transaction, responses, and deleted
+            // versions in a history carry no resource.
+            static const QStringList bodiless = {"GET", "HEAD", "DELETE"};
+            const QString method = entry.value("request").toObject().value("method").toString();
+            if (resource.resourcePath.isEmpty() && !bodiless.contains(method) && !type.endsWith("-response") &&
+                type != "history")
+                add(Severity::Error, "resource", tr("Entry has no resource object"));
             const QString fullUrl = resource.fullUrl;
+            // Transactions, batches, and their responses may leave fullUrl out.
+            static const QStringList needFullUrl = {"document", "message", "collection", "searchset"};
             if (fullUrl.isEmpty()) {
-                if (!resource.resourcePath.isEmpty() && !request)
+                // A search's OperationOutcome (search.mode outcome) is not a match and needs none.
+                const bool outcome = entry.value("search").toObject().value("mode").toString() == "outcome";
+                if (!resource.resourcePath.isEmpty() && needFullUrl.contains(type) && !outcome)
                     add(Severity::Warning, "fullUrl", tr("Entry has no fullUrl, so other entries can't reference it"));
             } else {
-                if (fullUrls.contains(fullUrl))
+                if (fullUrls.contains(fullUrl) && !differentVersions(fullUrls.value(fullUrl), i))
                     add(Severity::Error, "fullUrl",
                         tr("fullUrl is also used by entry %1").arg(m_file.resources[fullUrls.value(fullUrl)].entry),
                         fullUrl);
@@ -410,10 +433,13 @@ private:
         }
         if (target >= 0 || !inFile)
             return;
-        if (m_file.kind == File::Kind::Bundle && match.hasMatch())
-            add(Severity::Warning, path, tr("Reference does not resolve within this Bundle"), reference);
+        // A document must carry everything it references; other bundles
+        // (searchsets, collections, messages) may point at a server, as bulk
+        // export points at other files, so those are counted once.
+        if (m_bundleType == "document" && match.hasMatch())
+            add(Severity::Warning, path, tr("Reference does not resolve within this document"), reference);
         else
-            ++m_outside; // Normal in bulk export, where each type has its own file; reported once.
+            ++m_outside;
     }
 
     // Required elements, their JSON shapes, and required code sets for the
@@ -623,6 +649,7 @@ private:
     QString m_base, m_type;
     QSet<QString> m_contained;
     int m_conditional = 0, m_outside = 0;
+    QString m_bundleType;
 };
 
 } // namespace

@@ -150,7 +150,7 @@
   "%1 is not a resource type": "%1 er ikke en ressourcetype",
   "Reference has an invalid id": "Referencen har et ugyldigt id",
   "Reference is neither Type/id, an absolute URL, a urn, nor #contained": "Referencen er hverken Type/id, en absolut URL, en urn eller #indlejret",
-  "Reference does not resolve within this Bundle": "Referencen findes ikke i dette Bundle",
+  "Reference does not resolve within this document": "Referencen findes ikke i dette dokument",
   "References to resources outside this file, not checked: %n": "Referencer til ressourcer uden for filen, ikke tjekket: %n",
   "%1.%2 is required": "%1.%2 er påkrævet",
   "%1.%2[x] is required": "%1.%2[x] er påkrævet",

@@ -189,7 +189,8 @@ private slots:
         const QList<Issue> issues = validate(file);
         QVERIFY2(has(issues, Severity::Error, "resource.subject.reference", "does not resolve to any fullUrl"),
                  qPrintable(dump(issues)));
-        QVERIFY(has(issues, Severity::Warning, "resource.subject.reference", "does not resolve within this Bundle"));
+        // A collection may point at a server: counted once, not warned about.
+        QVERIFY(has(issues, Severity::Info, "", "References to resources outside this file, not checked: 1"));
         QVERIFY(has(issues, Severity::Error, "resource.performer[0].reference", "contained resource that isn't there"));
         QVERIFY(has(issues, Severity::Error, "fullUrl", "fullUrl is also used by entry 4"));
         for (const auto &issue : issues)
@@ -447,8 +448,10 @@ private slots:
                          .toJson());
         QJsonObject bad = observation(kTestPatient, "2024-02-30", 7.2);
         write(broken, QJsonDocument(bundle({entry(kTestPatient, testPatient()), entry(uuid(111), bad)})).toJson());
+        // A document must carry what it references, so this is a warning.
         write(warned, QJsonDocument(bundle({entry(kTestPatient, testPatient()),
-                                            entry(uuid(112), observation("Patient/elsewhere", "2024-01-01", 7))}))
+                                            entry(uuid(112), observation("Patient/elsewhere", "2024-01-01", 7))},
+                                           "document"))
                           .toJson());
         QCOMPARE(runCli({"fhir", "check", clean, "--json"}), 0);
         QCOMPARE(runCli({"fhir", "check", broken, "--json"}), 1);
@@ -549,7 +552,8 @@ private slots:
                                  {"conclusion", "John Smith is fine"}};
         const File file = loaded(bundle({entry("https://example.org/fhir/Patient/john-smith", patient),
                                          entry(uuid(150), noted), entry(uuid(151), stringValue), entry(uuid(152), report),
-                                         entry(uuid(153), observation("Patient/john-missing", "2024-01-04", 1))}));
+                                         entry(uuid(153), observation("Patient/john-missing", "2024-01-04", 1))},
+                                        "document"));
         const QByteArray shown = QJsonDocument(redact(file.resources[2].shown).toObject()).toJson();
         QVERIFY2(!shown.contains("John") && !shown.contains("555-1234") && !shown.contains("john-smith"), shown.constData());
         QVERIFY(shown.contains("Patient/[redacted]"));
@@ -627,6 +631,54 @@ private slots:
         QCOMPARE(issues.first().severity, Severity::Info);
         QCOMPARE(issues.first().resource, -1);
         QVERIFY2(issues.first().message.endsWith("left for the server to resolve: 2"), qPrintable(dump(issues)));
+    }
+
+    void hl7ExampleShapesAreAccepted()
+    {
+        // Shapes from the official R4 examples that are valid and must not be reported.
+        QJsonObject contract{{"resourceType", "Contract"}, {"id", "c1"}, {"issued", "2015-11-18"}};
+        QJsonObject v1 = testPatient(), v2 = testPatient();
+        v1.insert("meta", QJsonObject{{"versionId", "1"}});
+        v2.insert("meta", QJsonObject{{"versionId", "2"}});
+        const QJsonObject versions = bundle({entry("http://example.org/fhir/Patient/test-patient", v1),
+                                             entry("http://example.org/fhir/Patient/test-patient", v2),
+                                             entry(uuid(220), contract)});
+        QList<Issue> issues = validate(loaded(versions));
+        QVERIFY2(issues.isEmpty(), qPrintable(dump(issues)));
+
+        // Reads in a transaction carry no resource.
+        const QJsonObject reads{{"resourceType", "Bundle"}, {"type", "batch"},
+                                {"entry", QJsonArray{QJsonObject{{"request", QJsonObject{{"method", "GET"}, {"url", "Patient/1"}}}}}}};
+        issues = validate(loaded(reads));
+        QVERIFY2(issues.isEmpty(), qPrintable(dump(issues)));
+
+        // Responses may leave fullUrl out.
+        const QJsonObject response{{"resourceType", "Bundle"}, {"type", "batch-response"},
+                                   {"entry", QJsonArray{QJsonObject{{"resource", testPatient()},
+                                                                    {"response", QJsonObject{{"status", "200 OK"}}}}}}};
+        issues = validate(loaded(response));
+        QVERIFY2(issues.isEmpty(), qPrintable(dump(issues)));
+
+        // A document, unlike a collection, must contain what it references.
+        QJsonObject document = bundle({entry(kTestPatient, testPatient()),
+                                       entry(uuid(221), observation("Patient/elsewhere", "2024-01-01", 7))},
+                                      "document");
+        issues = validate(loaded(document));
+        QVERIFY2(has(issues, Severity::Warning, "resource.subject.reference", "does not resolve within this document"),
+                 qPrintable(dump(issues)));
+
+        // The same version twice is still a duplicate.
+        const QJsonObject twice = bundle({entry("http://example.org/fhir/Patient/test-patient", v1),
+                                          entry("http://example.org/fhir/Patient/test-patient", v1)});
+        issues = validate(loaded(twice));
+        QVERIFY(has(issues, Severity::Error, "fullUrl", "fullUrl is also used by entry 0"));
+        QVERIFY(has(issues, Severity::Warning, "resource.id", "appears more than once"));
+
+        // Observation.issued stays an instant.
+        QJsonObject observed = observation(kTestPatient, "2024-01-01", 7);
+        observed.insert("issued", "2024-01-01");
+        QVERIFY(has(validate(loaded(bundle({entry(kTestPatient, testPatient()), entry(uuid(222), observed)}))),
+                    Severity::Error, "resource.issued", "not a valid FHIR instant"));
     }
 
     void svgExportFollowsTheChoiceNotTheName()
