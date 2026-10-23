@@ -6,6 +6,7 @@
 #include <QVariantList>
 
 #include "fhirfile.h"
+#include "rowmodel.h"
 #include "timeline.h"
 
 class FilePicker;
@@ -31,12 +32,13 @@ class Backend : public QObject {
     Q_PROPERTY(bool filtering READ filtering NOTIFY filterChanged)
     Q_PROPERTY(bool sortBySeverity READ sortBySeverity WRITE setSortBySeverity NOTIFY issuesChanged)
 
-    Q_PROPERTY(QVariantList timelineRows READ timelineRows NOTIFY rowsChanged)
+    Q_PROPERTY(RowModel *timelineModel READ timelineModel CONSTANT)
+    Q_PROPERTY(RowModel *resourceModel READ resourceModel CONSTANT)
+    Q_PROPERTY(RowModel *issueModel READ issueModel CONSTANT)
     Q_PROPERTY(QVariantList timelineTypes READ timelineTypes NOTIFY rowsChanged)
-    Q_PROPERTY(QVariantList resourceRows READ resourceRows NOTIFY rowsChanged)
-    Q_PROPERTY(QVariantList issueRows READ issueRows NOTIFY issuesChanged)
     Q_PROPERTY(QString message READ message NOTIFY messageChanged)
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
+    Q_PROPERTY(bool exporting READ exporting NOTIFY exportingChanged)
     Q_PROPERTY(QString loadingName READ loadingName NOTIFY loadingChanged)
 
 public:
@@ -63,10 +65,14 @@ public:
     bool sortBySeverity() const { return m_sortBySeverity; }
     void setSortBySeverity(bool sort);
 
-    QVariantList timelineRows() const { return m_timelineRows; }
+    RowModel *timelineModel() const { return m_timelineModel; }
+    RowModel *resourceModel() const { return m_resourceModel; }
+    RowModel *issueModel() const { return m_issueModel; }
+    // Every row at once, for tests and scripts; QML reads the models.
+    QVariantList timelineRows() const { return m_timelineModel->all(); }
+    QVariantList resourceRows() const { return m_resourceModel->all(); }
+    QVariantList issueRows() const { return m_issueModel->all(); }
     QVariantList timelineTypes() const { return m_timelineTypes; }
-    QVariantList resourceRows() const { return m_resourceRows; }
-    QVariantList issueRows() const { return m_issueRows; }
     QString message() const { return m_message; }
 
     // Opens and checks a file before returning, as tests and scripts want.
@@ -79,7 +85,11 @@ public:
     Q_INVOKABLE void requestOpen();
     // kind is issues-json, issues-csv, timeline-csv, timeline-pdf, or timeline-svg.
     Q_INVOKABLE void requestExport(const QString &kind);
+    // Writes the export before returning, as tests and scripts want.
     Q_INVOKABLE bool exportTo(const QString &kind, const QString &path);
+    // Writes it on a worker thread, so a long PDF doesn't freeze the window.
+    Q_INVOKABLE void exportInBackground(const QString &kind, const QString &path);
+    bool exporting() const { return m_exporting > 0; }
 
     Q_INVOKABLE void setTypeFilter(const QString &type, bool enabled);
     // Dates as YYYY-MM-DD, or empty for no bound; false when one doesn't parse.
@@ -108,11 +118,28 @@ signals:
     void issuesChanged();
     void messageChanged();
     void loadingChanged();
+    void exportingChanged();
 
 private:
     struct Opened;
+    struct ExportJob;
+    static QString runExport(const ExportJob &job);
+    bool prepareExport(const QString &kind, const QString &path, ExportJob *job);
+    void finishExport(const QString &path, const QString &error);
     static Opened openFile(const QString &path, const QLocale &locale);
     bool apply(Opened &&opened, const QString &path);
+    struct TimelineRow {
+        int group, event, count; // event -1 is the patient's heading
+    };
+    struct ResourceRow {
+        QString type;
+        int resource, count; // resource -1 is the type's heading
+    };
+    void indexResources();
+    QString resourceSummary(int index) const;
+    QVariant timelineCell(int row, const QString &role) const;
+    QVariant resourceCell(int row, const QString &role) const;
+    QVariant issueCell(int row, const QString &role) const;
     bool matchesSearch(const QStringList &fields) const;
     void rebuildTimelineRows();
     void rebuildResourceRows();
@@ -132,7 +159,13 @@ private:
     QString m_loadError, m_message, m_pendingExport;
     int m_errors = 0, m_warnings = 0, m_infos = 0;
     int m_generation = 0;
+    int m_exporting = 0;
     bool m_loading = false;
     QString m_loadingName;
-    QVariantList m_timelineRows, m_timelineTypes, m_resourceRows, m_issueRows;
+    QVariantList m_timelineTypes;
+    QList<TimelineRow> m_timelineRowList;
+    QList<ResourceRow> m_resourceRowList;
+    QList<int> m_issueRowList;
+    RowModel *m_timelineModel = nullptr, *m_resourceModel = nullptr, *m_issueModel = nullptr;
+    QHash<int, int> m_eventOfResource, m_issueCount, m_worst;
 };

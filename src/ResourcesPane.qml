@@ -10,20 +10,20 @@ Item {
     property int currentRow: -1
     property string highlightPath: ""
     property int refIndex: 0
-    readonly property var rows: backend.resourceRows
-    readonly property var current: currentRow >= 0 && currentRow < rows.length ? rows[currentRow] : null
+    readonly property var rows: backend.resourceModel
+    readonly property var current: (rows.revision, currentRow >= 0 && currentRow < rows.count ? rows.get(currentRow) : null)
     readonly property int resource: current && !current.header ? current.resource : -1
     readonly property var shown: (backend.redact, resource >= 0 ? backend.resourceView(resource, highlightPath) : null)
     readonly property var refs: resource >= 0 ? backend.references(resource) : []
 
     function move(delta) {
-        if (rows.length === 0)
+        if (rows.count === 0)
             return
         const start = currentRow < 0 ? 0 : currentRow
-        select(Math.max(0, Math.min(rows.length - 1, start + delta)))
+        select(Math.max(0, Math.min(rows.count - 1, start + delta)))
     }
     function select(row, path) {
-        if (row < 0 || row >= rows.length)
+        if (row < 0 || row >= rows.count)
             return
         highlightPath = path || ""
         currentRow = row
@@ -49,17 +49,19 @@ Item {
     }
     // Keep the same row selected, header or resource, when the tree changes under it.
     property string keep: ""
-    function keyOf(row) { return row.header ? "type:" + row.type : "resource:" + row.resource }
-    onCurrentChanged: if (current) keep = keyOf(current)
-    onRowsChanged: {
-        for (let i = 0; i < rows.length; ++i)
-            if (keyOf(rows[i]) === keep) {
-                currentRow = i
-                return
-            }
-        if (currentRow >= rows.length || currentRow < 0)
-            currentRow = rows.length > 1 ? 1 : rows.length - 1
+    onCurrentChanged: if (current) keep = current.key
+    function restoreSelection() {
+        const kept = rows.find("key", keep)
+        if (kept >= 0)
+            currentRow = kept
+        else if (currentRow >= rows.count || currentRow < 0)
+            currentRow = rows.count > 1 ? 1 : rows.count - 1
     }
+    Connections {
+        target: pane.rows
+        function onReset() { pane.restoreSelection() }
+    }
+    Component.onCompleted: restoreSelection()
 
     RowLayout {
         anchors.fill: parent
@@ -76,11 +78,11 @@ Item {
 
             delegate: Item {
                 id: row
-                required property var modelData
+                required property var model
                 required property int index
                 readonly property bool selected: index === pane.currentRow
                 width: ListView.view.width
-                height: modelData.header ? 36 : 40
+                height: model.header ? 36 : 40
 
                 Rectangle {
                     anchors.fill: parent
@@ -99,19 +101,19 @@ Item {
                 }
 
                 RowLayout {
-                    visible: row.modelData.header
+                    visible: row.model.header
                     anchors.fill: parent
                     anchors.leftMargin: 16
                     anchors.rightMargin: 16
                     spacing: 8
                     Label {
-                        text: row.modelData.expanded ? "▾" : "▸"
+                        text: row.model.expanded ? "▾" : "▸"
                         color: win.muted
                         font.pixelSize: 12
                     }
-                    TypeIcon { type: row.modelData.type || "" }
+                    TypeIcon { type: row.model.type || "" }
                     Label {
-                        text: row.modelData.type || ""
+                        text: row.model.type || ""
                         color: win.textColor
                         font.pixelSize: 13
                         font.bold: true
@@ -119,14 +121,14 @@ Item {
                         Layout.fillWidth: true
                     }
                     Label {
-                        text: row.modelData.header ? Number(row.modelData.count).toLocaleString(Qt.locale(), 'f', 0) : ""
+                        text: row.model.header ? Number(row.model.count).toLocaleString(Qt.locale(), 'f', 0) : ""
                         color: win.muted
                         font.pixelSize: 12
                     }
                 }
 
                 RowLayout {
-                    visible: !row.modelData.header
+                    visible: !row.model.header
                     anchors.fill: parent
                     anchors.leftMargin: 42
                     anchors.rightMargin: 16
@@ -135,7 +137,7 @@ Item {
                         spacing: 1
                         Layout.fillWidth: true
                         Label {
-                            text: row.modelData.label || ""
+                            text: row.model.label || ""
                             color: win.textColor
                             font.pixelSize: 12
                             font.family: win.mono
@@ -143,7 +145,7 @@ Item {
                             Layout.fillWidth: true
                         }
                         Label {
-                            text: row.modelData.summary || ""
+                            text: row.model.summary || ""
                             visible: text.length > 0
                             color: win.muted
                             font.pixelSize: 11
@@ -152,18 +154,18 @@ Item {
                         }
                     }
                     Rectangle {
-                        visible: (row.modelData.issues || 0) > 0
+                        visible: (row.model.issues || 0) > 0
                         implicitWidth: issueCount.implicitWidth + 12
                         implicitHeight: 18
                         radius: 9
-                        color: Qt.alpha(win.severityColor(["error", "warning", "info"][row.modelData.worst] || "info"), 0.22)
+                        color: Qt.alpha(win.severityColor(["error", "warning", "info"][row.model.worst] || "info"), 0.22)
                         Label {
                             id: issueCount
                             anchors.centerIn: parent
-                            text: row.modelData.issues || ""
+                            text: row.model.issues || ""
                             font.pixelSize: 10
                             font.bold: true
-                            color: win.severityColor(["error", "warning", "info"][row.modelData.worst] || "info")
+                            color: win.severityColor(["error", "warning", "info"][row.model.worst] || "info")
                         }
                     }
                 }
@@ -171,8 +173,8 @@ Item {
                 TapHandler {
                     onTapped: {
                         pane.select(row.index)
-                        if (row.modelData.header)
-                            backend.toggleType(row.modelData.type)
+                        if (row.model.header)
+                            backend.toggleType(row.model.type)
                     }
                 }
             }

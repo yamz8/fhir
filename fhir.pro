@@ -13,6 +13,7 @@ HEADERS += \
     src/portalfilepicker.h \
     src/redact.h \
     src/report.h \
+    src/rowmodel.h \
     src/theme.h \
     src/timeline.h \
     src/translator.h \
@@ -28,6 +29,7 @@ SOURCES += \
     src/portalfilepicker.cpp \
     src/redact.cpp \
     src/report.cpp \
+    src/rowmodel.cpp \
     src/theme.cpp \
     src/timeline.cpp \
     src/translator.cpp \

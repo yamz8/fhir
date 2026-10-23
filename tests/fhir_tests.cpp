@@ -724,6 +724,31 @@ private slots:
         QCOMPARE(backend.fileName(), QString("second.json"));
     }
 
+    void exportsInTheBackground()
+    {
+        QTemporaryDir dir;
+        write(dir.filePath("b.json"), QJsonDocument(bundle({entry(kTestPatient, testPatient()),
+                                                            entry(uuid(230), observation(kTestPatient, "2024-01-01", 7.2)),
+                                                            entry(uuid(231), observation(kTestPatient, "2024-02-01", 7.0))}))
+                                          .toJson());
+        Backend backend;
+        QVERIFY(backend.openPath(dir.filePath("b.json")));
+        backend.setRedact(true);
+        backend.exportInBackground("timeline-pdf", dir.filePath("t.pdf"));
+        backend.exportInBackground("timeline-csv", dir.filePath("t.csv"));
+        QVERIFY(backend.exporting());
+        // Changing the view meanwhile doesn't change what is being written.
+        backend.setRedact(false);
+        QTRY_VERIFY(!backend.exporting());
+        QFile pdf(dir.filePath("t.pdf")), csv(dir.filePath("t.csv"));
+        QVERIFY(pdf.open(QIODevice::ReadOnly) && pdf.read(4) == "%PDF");
+        QVERIFY(csv.open(QIODevice::ReadOnly));
+        const QByteArray text = csv.readAll();
+        QVERIFY2(text.contains("Patient 1") && !text.contains("Test Patient"), text.constData());
+        backend.exportInBackground("timeline-csv", dir.filePath("b.json"));
+        QVERIFY(!backend.exporting());
+    }
+
     void incomingReferencesAreIndexed()
     {
         QTemporaryDir dir;

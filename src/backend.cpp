@@ -50,12 +50,20 @@ void collectReferences(const QJsonValue &value, const QString &path, QList<QPair
 } // namespace
 
 Backend::Backend(FilePicker *picker, QObject *parent) : QObject(parent), m_picker(picker) {
+    m_timelineModel = new RowModel({"header", "event", "resource", "type", "date", "summary", "status", "hasTrend",
+                                    "label", "count"},
+                                   [this](int row, const QString &role) { return timelineCell(row, role); }, this);
+    m_resourceModel = new RowModel({"header", "type", "resource", "key", "count", "expanded", "label", "summary",
+                                    "issues", "worst"},
+                                   [this](int row, const QString &role) { return resourceCell(row, role); }, this);
+    m_issueModel = new RowModel({"issue", "severity", "rank", "location", "message", "resource", "path"},
+                                [this](int row, const QString &role) { return issueCell(row, role); }, this);
     if (m_picker) {
         connect(m_picker, &FilePicker::openSelected, this, &Backend::openUrl);
         connect(m_picker, &FilePicker::saveSelected, this, [this](const QUrl &url) {
             const QString kind = m_pendingExport;
             m_pendingExport.clear();
-            exportTo(kind, url.toLocalFile());
+            exportInBackground(kind, url.toLocalFile());
         });
         connect(m_picker, &FilePicker::failed, this, &Backend::showMessage);
     }
@@ -140,6 +148,7 @@ bool Backend::apply(Opened &&opened, const QString &path) {
     m_incoming = std::move(opened.incoming);
     m_filter = Filter();
     m_collapsed.clear();
+    indexResources();
     emit fileChanged();
     emit filterChanged();
     rebuildTimelineRows();
@@ -202,28 +211,75 @@ void Backend::requestExport(const QString &kind) {
         m_picker->saveFile(QUrl::fromLocalFile(suggestedPath(kind)), kind.section('-', 1));
 }
 
-bool Backend::exportTo(const QString &kind, const QString &path) {
+// What an export needs, copied so it can be written while the window goes on.
+// Qt shares the data underneath, so the copy is cheap.
+struct Backend::ExportJob {
+    QString kind, path;
+    File file;
+    QList<Issue> issues;
+    Timeline timeline;
+    Filter filter;
+    bool redact = false;
+    QLocale locale;
+};
+
+QString Backend::runExport(const ExportJob &job) {
+    QString error;
+    bool ok = false;
+    if (job.kind == "issues-json")
+        ok = saveAtomically(job.path, QJsonDocument(issuesJson(job.file, job.issues, job.redact)).toJson(), &error);
+    else if (job.kind == "issues-csv")
+        ok = saveAtomically(job.path, issuesCsv(job.file, job.issues, job.redact), &error);
+    else if (job.kind == "timeline-csv")
+        ok = saveAtomically(job.path, timelineCsv(job.file, job.timeline, job.filter, job.redact), &error);
+    else if (job.kind == "timeline-pdf" || job.kind == "timeline-svg")
+        ok = exportTimelineDocument(job.path, job.kind.section('-', 1), job.file, job.timeline, job.filter, job.redact,
+                                    job.locale, &error);
+    else
+        error = tr("Unknown export");
+    return ok ? QString() : (error.isEmpty() ? tr("Unknown error") : error);
+}
+
+bool Backend::prepareExport(const QString &kind, const QString &path, ExportJob *job) {
     if (path.isEmpty())
         return false;
     if (QFileInfo(path).absoluteFilePath() == QFileInfo(m_file.path).absoluteFilePath()) {
         showMessage(tr("Not exporting over the source file; it is only ever read."));
         return false;
     }
-    QString error;
-    bool ok = false;
-    if (kind == "issues-json")
-        ok = saveAtomically(path, QJsonDocument(issuesJson(m_file, m_issues, m_redact)).toJson(), &error);
-    else if (kind == "issues-csv")
-        ok = saveAtomically(path, issuesCsv(m_file, m_issues, m_redact), &error);
-    else if (kind == "timeline-csv")
-        ok = saveAtomically(path, timelineCsv(m_file, m_timeline, m_filter, m_redact), &error);
-    else if (kind == "timeline-pdf" || kind == "timeline-svg")
-        ok = exportTimelineDocument(path, kind.section('-', 1), m_file, m_timeline, m_filter, m_redact, QLocale(), &error);
-    else
-        error = tr("Unknown export");
-    showMessage(ok ? tr("Exported %1").arg(QFileInfo(path).fileName())
-                   : tr("Could not export %1: %2").arg(QFileInfo(path).fileName(), error));
-    return ok;
+    *job = ExportJob{kind, path, m_file, m_issues, m_timeline, m_filter, m_redact, QLocale()};
+    return true;
+}
+
+void Backend::finishExport(const QString &path, const QString &error) {
+    showMessage(error.isEmpty() ? tr("Exported %1").arg(QFileInfo(path).fileName())
+                                : tr("Could not export %1: %2").arg(QFileInfo(path).fileName(), error));
+}
+
+bool Backend::exportTo(const QString &kind, const QString &path) {
+    ExportJob job;
+    if (!prepareExport(kind, path, &job))
+        return false;
+    const QString error = runExport(job);
+    finishExport(path, error);
+    return error.isEmpty();
+}
+
+void Backend::exportInBackground(const QString &kind, const QString &path) {
+    ExportJob job;
+    if (!prepareExport(kind, path, &job))
+        return;
+    ++m_exporting;
+    emit exportingChanged();
+    showMessage(tr("Exporting %1…").arg(QFileInfo(path).fileName()));
+    auto *watcher = new QFutureWatcher<QString>(this);
+    connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher, path] {
+        watcher->deleteLater();
+        --m_exporting;
+        emit exportingChanged();
+        finishExport(path, watcher->result());
+    });
+    watcher->setFuture(QtConcurrent::run(&Backend::runExport, job));
 }
 
 void Backend::setRedact(bool redact) {
@@ -304,6 +360,7 @@ void Backend::relocalize() {
         return;
     m_timeline = buildTimeline(m_file, QLocale());
     m_trends = trends(m_timeline);
+    indexResources();
     emit fileChanged();
     rebuildTimelineRows();
     rebuildResourceRows();
@@ -323,34 +380,100 @@ bool Backend::matchesSearch(const QStringList &fields) const {
     return true;
 }
 
+void Backend::indexResources() {
+    m_eventOfResource.clear();
+    for (int e = m_timeline.events.size() - 1; e >= 0; --e)
+        m_eventOfResource.insert(m_timeline.events[e].resource, e);
+    m_issueCount.clear();
+    m_worst.clear();
+    for (const auto &issue : m_issues) {
+        m_issueCount[issue.resource] += 1;
+        m_worst[issue.resource] = std::min(m_worst.value(issue.resource, 3), severityRank(issue.severity));
+    }
+}
+
+QString Backend::resourceSummary(int index) const {
+    const Resource &resource = m_file.resources[index];
+    if (resource.type == "Patient")
+        return patientLabel(m_file, m_timeline, m_file.label(index), index, m_redact);
+    if (resource.container)
+        return tr("%n entries", nullptr, m_file.entryCount());
+    const int event = m_eventOfResource.value(index, -1);
+    return event >= 0 ? summaryOf(m_timeline.events[event], m_redact) : conceptText(resource.json.value("code"));
+}
+
+QVariant Backend::timelineCell(int row, const QString &role) const {
+    const TimelineRow &r = m_timelineRowList[row];
+    const PatientGroup &group = m_timeline.groups[r.group];
+    if (role == "header")
+        return r.event < 0;
+    if (r.event < 0) {
+        if (role == "label") return patientLabel(m_file, m_timeline, group, m_redact);
+        if (role == "count") return r.count;
+        if (role == "resource") return group.patient;
+        if (role == "event") return -1;
+        return {};
+    }
+    const Event &event = m_timeline.events[r.event];
+    if (role == "event") return r.event;
+    if (role == "resource") return event.resource;
+    if (role == "type") return event.type;
+    if (role == "date") return displayDate(event, QLocale());
+    if (role == "summary") return summaryOf(event, m_redact);
+    if (role == "status") return event.status;
+    if (role == "hasTrend") return m_trends.contains(event.trendKey);
+    return {};
+}
+
+QVariant Backend::resourceCell(int row, const QString &role) const {
+    const ResourceRow &r = m_resourceRowList[row];
+    if (role == "header") return r.resource < 0;
+    if (role == "type") return r.type;
+    if (role == "resource") return r.resource;
+    if (role == "key") return r.resource < 0 ? "type:" + r.type : "resource:" + QString::number(r.resource);
+    if (r.resource < 0) {
+        if (role == "count") return r.count;
+        if (role == "expanded") return !m_collapsed.contains(r.type);
+        return {};
+    }
+    if (role == "label") return m_file.label(r.resource, m_redact);
+    if (role == "summary") return resourceSummary(r.resource);
+    if (role == "issues") return m_issueCount.value(r.resource);
+    if (role == "worst") return m_worst.value(r.resource, 3);
+    return {};
+}
+
+QVariant Backend::issueCell(int row, const QString &role) const {
+    const int i = m_issueRowList[row];
+    const Issue &issue = m_issues[i];
+    if (role == "issue") return i;
+    if (role == "severity") return severityName(issue.severity);
+    if (role == "rank") return severityRank(issue.severity);
+    if (role == "location") return m_file.location(issue);
+    if (role == "message") return issueText(issue, m_redact);
+    if (role == "resource") return issue.resource;
+    if (role == "path") return issue.path;
+    return {};
+}
+
 void Backend::rebuildTimelineRows() {
-    m_timelineRows.clear();
+    m_timelineRowList.clear();
     QHash<QString, int> typeCounts;
     for (int g = 0; g < m_timeline.groups.size(); ++g) {
         const PatientGroup &group = m_timeline.groups[g];
-        QVariantList rows;
+        const int header = m_timelineRowList.size();
+        m_timelineRowList << TimelineRow{g, -1, 0};
         for (const int index : group.events) {
             const Event &event = m_timeline.events[index];
             typeCounts[event.type] += 1;
-            if (!m_filter.matches(m_file, event))
-                continue;
-            rows << QVariantMap{{"header", false},
-                                {"event", index},
-                                {"resource", event.resource},
-                                {"type", event.type},
-                                {"date", displayDate(event, QLocale())},
-                                {"summary", summaryOf(event, m_redact)},
-                                {"status", event.status},
-                                {"hasTrend", m_trends.contains(event.trendKey)}};
+            if (m_filter.matches(m_file, event))
+                m_timelineRowList << TimelineRow{g, index, 0};
         }
-        if (rows.isEmpty())
-            continue;
-        m_timelineRows << QVariantMap{{"header", true},
-                                      {"label", patientLabel(m_file, m_timeline, group, m_redact)},
-                                      {"count", rows.size()},
-                                      {"resource", group.patient}};
-        m_timelineRows += rows;
+        m_timelineRowList[header].count = m_timelineRowList.size() - header - 1;
+        if (m_timelineRowList[header].count == 0)
+            m_timelineRowList.removeLast();
     }
+    m_timelineModel->resetRows(m_timelineRowList.size());
     m_timelineTypes.clear();
     QStringList types = typeCounts.keys();
     std::sort(types.begin(), types.end(), [](const QString &a, const QString &b) {
@@ -364,12 +487,7 @@ void Backend::rebuildTimelineRows() {
 }
 
 void Backend::rebuildResourceRows() {
-    m_resourceRows.clear();
-    QHash<int, int> issueCount, worst;
-    for (const auto &issue : m_issues) {
-        issueCount[issue.resource] += 1;
-        worst[issue.resource] = std::min(worst.value(issue.resource, 3), severityRank(issue.severity));
-    }
+    m_resourceRowList.clear();
     QHash<QString, QList<int>> byType;
     for (int i = 0; i < m_file.resources.size(); ++i)
         byType[m_file.resources[i].type.isEmpty() ? QString("(no resourceType)") : m_file.resources[i].type] << i;
@@ -377,36 +495,17 @@ void Backend::rebuildResourceRows() {
     std::sort(types.begin(), types.end(), [](const QString &a, const QString &b) {
         return typeOrder(a) != typeOrder(b) ? typeOrder(a) < typeOrder(b) : a < b;
     });
-    QHash<int, QString> summaries;
-    for (const auto &event : m_timeline.events)
-        summaries.insert(event.resource, summaryOf(event, m_redact));
+    const bool searching = !m_filter.text.trimmed().isEmpty();
     for (const auto &type : types) {
         const QList<int> indices = byType.value(type);
-        const bool expanded = !m_collapsed.contains(type);
-        m_resourceRows << QVariantMap{{"header", true}, {"type", type}, {"count", indices.size()},
-                                      {"expanded", expanded}, {"resource", -1}};
-        for (const int index : indices) {
-            const Resource &resource = m_file.resources[index];
-            QString summary = summaries.value(index);
-            if (resource.type == "Patient") {
-                summary = patientLabel(m_file, m_timeline, m_file.label(index), index, m_redact);
-            } else if (resource.container) {
-                summary = tr("%n entries", nullptr, m_file.entryCount());
-            } else if (summary.isEmpty()) {
-                summary = conceptText(resource.json.value("code"));
-            }
-            const QString label = m_file.label(index, m_redact);
-            if (!expanded || !matchesSearch({label, summary}))
-                continue;
-            m_resourceRows << QVariantMap{{"header", false},
-                                          {"type", type},
-                                          {"resource", index},
-                                          {"label", label},
-                                          {"summary", summary},
-                                          {"issues", issueCount.value(index)},
-                                          {"worst", worst.value(index, 3)}};
-        }
+        m_resourceRowList << ResourceRow{type, -1, int(indices.size())};
+        if (m_collapsed.contains(type))
+            continue;
+        for (const int index : indices)
+            if (!searching || matchesSearch({m_file.label(index, m_redact), resourceSummary(index)}))
+                m_resourceRowList << ResourceRow{type, index, 0};
     }
+    m_resourceModel->resetRows(m_resourceRowList.size());
     emit rowsChanged();
 }
 
@@ -418,19 +517,15 @@ void Backend::rebuildIssueRows() {
         std::stable_sort(order.begin(), order.end(), [this](int a, int b) {
             return severityRank(m_issues[a].severity) < severityRank(m_issues[b].severity);
         });
-    m_issueRows.clear();
+    m_issueRowList.clear();
+    const bool searching = !m_filter.text.trimmed().isEmpty();
     for (const int i : order) {
         const Issue &issue = m_issues[i];
-        if (!matchesSearch({m_file.location(issue), issueText(issue, m_redact), severityName(issue.severity)}))
-            continue;
-        m_issueRows << QVariantMap{{"issue", i},
-                                   {"severity", severityName(issue.severity)},
-                                   {"rank", severityRank(issue.severity)},
-                                   {"location", m_file.location(issue)},
-                                   {"message", issueText(issue, m_redact)},
-                                   {"resource", issue.resource},
-                                   {"path", issue.path}};
+        if (!searching ||
+            matchesSearch({m_file.location(issue), issueText(issue, m_redact), severityName(issue.severity)}))
+            m_issueRowList << i;
     }
+    m_issueModel->resetRows(m_issueRowList.size());
     emit issuesChanged();
 }
 
@@ -519,10 +614,8 @@ int Backend::revealResource(int index) {
                                                                 : m_file.resources[index].type;
     if (m_collapsed.remove(type))
         rebuildResourceRows();
-    for (int i = 0; i < m_resourceRows.size(); ++i) {
-        const QVariantMap row = m_resourceRows[i].toMap();
-        if (!row.value("header").toBool() && row.value("resource").toInt() == index)
+    for (int i = 0; i < m_resourceRowList.size(); ++i)
+        if (m_resourceRowList[i].resource == index)
             return i;
-    }
     return -1;
 }

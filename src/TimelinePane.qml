@@ -10,21 +10,18 @@ Item {
     id: pane
     property int currentRow: -1
     property int selectedEvent: -1
-    readonly property var rows: backend.timelineRows
-    readonly property var current: currentRow >= 0 && currentRow < rows.length ? rows[currentRow] : null
+    readonly property var rows: backend.timelineModel
+    readonly property var current: (rows.revision, currentRow >= 0 && currentRow < rows.count ? rows.get(currentRow) : null)
     readonly property var detail: current && !current.header
                                   ? (backend.redact, translator.language, backend.eventDetail(current.event)) : null
 
     function selectable(from, step) {
-        for (let i = from; i >= 0 && i < rows.length; i += step)
-            if (!rows[i].header)
-                return i
-        return -1
+        return rows.find("header", false, from, step)
     }
     function move(delta) {
         const step = delta > 0 ? 1 : -1
-        let start = currentRow < 0 ? (delta > 0 ? 0 : rows.length - 1) : currentRow + delta
-        start = Math.max(0, Math.min(rows.length - 1, start))
+        let start = currentRow < 0 ? (delta > 0 ? 0 : rows.count - 1) : currentRow + delta
+        start = Math.max(0, Math.min(rows.count - 1, start))
         let found = selectable(start, step)
         if (found < 0)
             found = selectable(start, -step)
@@ -32,10 +29,10 @@ Item {
             select(found)
     }
     function select(row) {
-        if (row < 0 || row >= rows.length)
+        if (row < 0 || row >= rows.count)
             return
         currentRow = row
-        selectedEvent = rows[row].header ? -1 : rows[row].event
+        selectedEvent = rows.value(row, "event")
         Qt.callLater(() => { if (list.height > 0) { list.forceLayout(); list.positionViewAtIndex(pane.currentRow, ListView.Contain) } })
     }
     function activate() {
@@ -43,15 +40,16 @@ Item {
             win.openResource(current.resource, "")
     }
     // A new filter keeps the same event selected when it's still shown.
-    onRowsChanged: {
-        for (let i = 0; i < rows.length; ++i)
-            if (!rows[i].header && rows[i].event === selectedEvent) {
-                currentRow = i
-                return
-            }
-        currentRow = selectable(0, 1)
-        selectedEvent = currentRow >= 0 ? rows[currentRow].event : -1
+    function restoreSelection() {
+        const kept = selectedEvent >= 0 ? rows.find("event", selectedEvent) : -1
+        currentRow = kept >= 0 ? kept : selectable(0, 1)
+        selectedEvent = rows.value(currentRow, "event") ?? -1
     }
+    Connections {
+        target: pane.rows
+        function onReset() { pane.restoreSelection() }
+    }
+    Component.onCompleted: restoreSelection()
 
     RowLayout {
         anchors.fill: parent
@@ -59,7 +57,7 @@ Item {
 
         ListView {
             id: list
-            visible: pane.rows.length > 0
+            visible: pane.rows.count > 0
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
@@ -69,15 +67,15 @@ Item {
 
             delegate: Item {
                 id: row
-                required property var modelData
+                required property var model
                 required property int index
                 readonly property bool selected: index === pane.currentRow
                 width: ListView.view.width
-                height: modelData.header ? 44 : 34
+                height: model.header ? 44 : 34
 
                 // Patient heading.
                 RowLayout {
-                    visible: row.modelData.header
+                    visible: row.model.header
                     anchors.fill: parent
                     anchors.leftMargin: 16
                     anchors.rightMargin: 16
@@ -85,7 +83,7 @@ Item {
                     spacing: 10
                     TypeIcon { type: "Patient"; Layout.alignment: Qt.AlignVCenter }
                     Label {
-                        text: row.modelData.label || ""
+                        text: row.model.label || ""
                         font.pixelSize: 14
                         font.bold: true
                         color: win.textColor
@@ -93,14 +91,14 @@ Item {
                         Layout.fillWidth: true
                     }
                     Label {
-                        text: row.modelData.header ? qsTr("%n events", "", row.modelData.count) : ""
+                        text: row.model.header ? qsTr("%n events", "", row.model.count) : ""
                         color: win.muted
                         font.pixelSize: 11
                     }
                 }
 
                 Rectangle {
-                    visible: !row.modelData.header
+                    visible: !row.model.header
                     anchors.fill: parent
                     anchors.leftMargin: 8
                     anchors.rightMargin: 8
@@ -118,14 +116,14 @@ Item {
                 }
 
                 RowLayout {
-                    visible: !row.modelData.header
+                    visible: !row.model.header
                     anchors.fill: parent
                     anchors.leftMargin: 26
                     anchors.rightMargin: 20
                     spacing: 12
-                    TypeIcon { type: row.modelData.type || "" }
+                    TypeIcon { type: row.model.type || "" }
                     Label {
-                        text: row.modelData.date || ""
+                        text: row.model.date || ""
                         color: win.muted
                         font.pixelSize: 12
                         font.features: { "tnum": 1 }
@@ -133,20 +131,20 @@ Item {
                         elide: Text.ElideRight
                     }
                     Label {
-                        text: row.modelData.summary || ""
+                        text: row.model.summary || ""
                         color: win.textColor
                         font.pixelSize: 13
                         elide: Text.ElideRight
                         Layout.fillWidth: true
                     }
                     Image {
-                        visible: row.modelData.hasTrend === true
+                        visible: row.model.hasTrend === true
                         source: "qrc:/icons/trend.svg"
                         sourceSize: Qt.size(14, 14)
                         opacity: 0.7
                     }
                     Label {
-                        text: row.modelData.type || ""
+                        text: row.model.type || ""
                         color: win.muted
                         font.pixelSize: 11
                         horizontalAlignment: Text.AlignRight
@@ -156,7 +154,7 @@ Item {
                 }
 
                 TapHandler {
-                    enabled: !row.modelData.header
+                    enabled: !row.model.header
                     onTapped: pane.select(row.index)
                     onDoubleTapped: { pane.select(row.index); pane.activate() }
                 }
@@ -165,7 +163,7 @@ Item {
 
         // Filtered down to nothing.
         Item {
-            visible: pane.rows.length === 0
+            visible: pane.rows.count === 0
             Layout.fillWidth: true
             Layout.fillHeight: true
             ColumnLayout {
@@ -189,7 +187,7 @@ Item {
         }
 
         Rectangle {
-            visible: win.detailVisible && pane.rows.length > 0
+            visible: win.detailVisible && pane.rows.count > 0
             Layout.preferredWidth: Math.min(400, pane.width * 0.4)
             Layout.fillHeight: true
             color: win.panel

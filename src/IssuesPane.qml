@@ -6,18 +6,18 @@ import QtQuick.Layouts
 // The validation report, with the selected issue's resource beside it.
 Item {
     id: pane
-    property int currentRow: rows.length > 0 ? 0 : -1
-    readonly property var rows: backend.issueRows
-    readonly property var current: currentRow >= 0 && currentRow < rows.length ? rows[currentRow] : null
+    property int currentRow: rows.count > 0 ? 0 : -1
+    readonly property var rows: backend.issueModel
+    readonly property var current: (rows.revision, currentRow >= 0 && currentRow < rows.count ? rows.get(currentRow) : null)
     readonly property var preview: current && current.resource >= 0
                                    ? (backend.redact, backend.resourceView(current.resource, current.path)) : null
 
     function move(delta) {
-        if (rows.length > 0)
-            select(Math.max(0, Math.min(rows.length - 1, (currentRow < 0 ? 0 : currentRow) + delta)))
+        if (rows.count > 0)
+            select(Math.max(0, Math.min(rows.count - 1, (currentRow < 0 ? 0 : currentRow) + delta)))
     }
     function select(row) {
-        if (row < 0 || row >= rows.length)
+        if (row < 0 || row >= rows.count)
             return
         currentRow = row
         Qt.callLater(() => { if (list.height > 0) { list.forceLayout(); list.positionViewAtIndex(pane.currentRow, ListView.Contain) } })
@@ -26,7 +26,13 @@ Item {
         if (current)
             win.openResource(current.resource, current.path)
     }
-    onRowsChanged: if (currentRow >= rows.length) currentRow = rows.length - 1
+    Connections {
+        target: pane.rows
+        function onReset() {
+            if (pane.currentRow >= pane.rows.count)
+                pane.currentRow = pane.rows.count - 1
+        }
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -85,7 +91,7 @@ Item {
 
             ListView {
                 id: list
-                visible: pane.rows.length > 0
+                visible: pane.rows.count > 0
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
@@ -95,7 +101,7 @@ Item {
 
                 delegate: Item {
                     id: row
-                    required property var modelData
+                    required property var model
                     required property int index
                     readonly property bool selected: index === pane.currentRow
                     width: ListView.view.width
@@ -129,12 +135,12 @@ Item {
                             Layout.alignment: Qt.AlignTop
                             Layout.topMargin: 2
                             radius: Math.min(4, theme.radius)
-                            color: Qt.alpha(win.severityColor(row.modelData.severity), 0.18)
+                            color: Qt.alpha(win.severityColor(row.model.severity), 0.18)
                             Label {
                                 id: severity
                                 anchors.centerIn: parent
-                                text: win.severityLabel(row.modelData.severity)
-                                color: win.severityColor(row.modelData.severity)
+                                text: win.severityLabel(row.model.severity)
+                                color: win.severityColor(row.model.severity)
                                 font.pixelSize: 11
                                 font.bold: true
                             }
@@ -144,14 +150,14 @@ Item {
                             spacing: 2
                             Layout.fillWidth: true
                             Label {
-                                text: row.modelData.message
+                                text: row.model.message
                                 color: win.textColor
                                 font.pixelSize: 13
                                 wrapMode: Text.WordWrap
                                 Layout.fillWidth: true
                             }
                             Label {
-                                text: row.modelData.location
+                                text: row.model.location
                                 color: win.muted
                                 font.pixelSize: 11
                                 font.family: win.mono
@@ -169,7 +175,7 @@ Item {
             }
 
             Item {
-                visible: pane.rows.length === 0
+                visible: pane.rows.count === 0
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 Label {
@@ -184,7 +190,7 @@ Item {
             }
 
             Rectangle {
-                visible: win.detailVisible && pane.rows.length > 0
+                visible: win.detailVisible && pane.rows.count > 0
                 Layout.preferredWidth: Math.min(520, pane.width * 0.45)
                 Layout.fillHeight: true
                 color: win.panel

@@ -83,6 +83,8 @@
   "Not exporting over the source file; it is only ever read.": "Eksporterer ikke oven i kildefilen; den bliver kun læst.",
   "Unknown export": "Ukendt eksport",
   "Exported %1": "Eksporterede %1",
+  "Exporting %1…": "Eksporterer %1…",
+  "Unknown error": "Ukendt fejl",
   "Could not export %1: %2": "Kunne ikke eksportere %1: %2",
   "Patient %1": "Patient %1",
   "%n entries": { "one": "%n post", "other": "%n poster" },
