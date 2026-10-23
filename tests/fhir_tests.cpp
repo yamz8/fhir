@@ -947,11 +947,38 @@ private slots:
 
     void shippedCatalogsParse()
     {
-        for (const char *code : {"en", "da"}) {
+        // Every translation covers the same strings as Danish, the most
+        // complete, and keeps each placeholder its English source has.
+        auto load = [](const QString &code) {
             QFile catalog(QString(":/i18n/%1.json").arg(code));
-            QVERIFY(catalog.open(QIODevice::ReadOnly));
-            QJsonParseError error;
-            QVERIFY2(QJsonDocument::fromJson(catalog.readAll(), &error).isObject(), qPrintable(error.errorString()));
+            if (!catalog.open(QIODevice::ReadOnly))
+                return QJsonObject();
+            return QJsonDocument::fromJson(catalog.readAll()).object();
+        };
+        QVERIFY(!load("en").isEmpty());
+        const QJsonObject reference = load("da");
+        QVERIFY(reference.size() > 100);
+        static const QRegularExpression placeholder("%[0-9n]");
+        auto placeholders = [&](const QString &text) {
+            QStringList found;
+            for (auto it = placeholder.globalMatch(text); it.hasNext();)
+                found << it.next().captured();
+            found.sort();
+            return found;
+        };
+        for (const char *code : {"de", "es-MX", "fr", "pt-BR"}) {
+            const QJsonObject catalog = load(code);
+            const QStringList keys = catalog.keys(), expected = reference.keys();
+            QCOMPARE(QSet<QString>(keys.begin(), keys.end()), QSet<QString>(expected.begin(), expected.end()));
+            for (auto it = catalog.begin(); it != catalog.end(); ++it) {
+                const QStringList forms = it.value().isObject() ? QStringList{it.value().toObject().value("one").toString(),
+                                                                                it.value().toObject().value("other").toString()}
+                                                                 : QStringList{it.value().toString()};
+                for (const auto &form : forms)
+                    QVERIFY2(placeholders(form) == placeholders(it.key()) ||
+                                 (it.value().isObject() && placeholders(form).contains("%n")),
+                             qPrintable(QString("%1: %2").arg(code, it.key())));
+            }
         }
     }
 };

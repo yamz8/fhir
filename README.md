@@ -116,6 +116,9 @@ bin/test       # the Qt Test suite, offscreen, on synthetic data only
 redaction, exports (`report`), the trend painter, the command line, and the
 QML. Translations live in `src/i18n/` as JSON catalogs keyed by the English
 text; the app follows the language picked under Omarchy's Setup > Language.
+It speaks English, Danish, German, French, Mexican Spanish, and Brazilian
+Portuguese. The translations are not yet reviewed by native speakers;
+corrections are welcome.
 
 Tests and examples use synthetic data only. Please don't add real patient
 data to issues, tests, or fixtures.
